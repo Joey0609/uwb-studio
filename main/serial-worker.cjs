@@ -7,6 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {SerialPort} = require('serialport');
 const {Model, fields} = require('./model.cjs');
+const {TelemetryFramer}=require('./telemetry.cjs');
 const model = new Model();
 const ports = new Map();
 let available = [], nextId = 1, control = {pending:false, results:[], expected:[]};
@@ -14,7 +15,7 @@ const directory = process.argv[2];
 fs.mkdirSync(directory, {recursive:true});
 const csvPath = path.join(directory, 'observations.csv');
 const csv = fs.createWriteStream(csvPath, {flags:'a', highWaterMark:1024*1024});
-csv.write('\uFEFFhost_time,port,self,boot,peer,peer_boot,update,distance_m,method,measurement_us,computed_us,age_us,valid\r\n');
+csv.write('\uFEFFhost_time,port,node_a,node_b,distance_m,record_type\r\n');
 let csvBlocked = false, csvDropped = 0, recordingError = '';
 csv.on('drain', () => { csvBlocked = false; });
 csv.on('error', e => { recordingError = e.message; csvBlocked = true; });
@@ -37,53 +38,71 @@ function snapshot(drain = true) {
     control.pending = false;
     control.timedOut = control.expected.some(id => !control.results.some(r => r.node === id && r.result === 'ok' && r.active === (control.action === 'start')));
   }
-  const state = model.snapshot(now);
-  return {...state, now, terminalDelta:drain, ports:[...ports.values()].map(p => {
-    const n = model.nodes.get(p.nodeId);
+  const state=model.snapshot(now);
+  state.edges=[...ports.values()].flatMap(p=>p.model.snapshot(now).edges.map(edge=>{
+    const key=`${edge.source}/${edge.peer}`;p.historySent??=new Map();const last=p.historySent.get(key)||0;
+    const history=drain?edge.history.filter(point=>point.id>last):edge.history;
+    if(drain&&history.length)p.historySent.set(key,history[history.length-1].id);
+    return {...edge,history,observer:p.path};
+  }));
+  const known=new Map(state.nodes.map(n=>[n.id,n]));for(const p of ports.values())for(const n of p.model.nodes.values()){if(!known.has(n.id)||n.id===p.nodeId)known.set(n.id,n);}
+  state.nodes=[...known.values()].sort((a,b)=>a.id-b.id);
+  return {...state, now, historyDelta:drain, terminalDelta:drain, ports:[...ports.values()].map(p => {
+    const n = p.model.nodes.get(p.nodeId);
     const lines = drain ? p.delta.splice(0) : p.lines.slice(-200);
-    const local=p.model.snapshot(now);
+    const local=p.model.snapshot(now,false);
     return {path:p.path,connected:p.connected,kind:p.kind,baudRate:p.baudRate,encoding:p.encoding,
       nodeId:p.nodeId,active:n?.active,periodMs:n?.periodMs,stream:n?.stream,
       rxBytes:p.rxBytes,txBytes:p.txBytes,dropped:p.rawDropped,droppedUi:p.droppedUi,
       lines,error:p.error,recording:p.rawPath,
-      matrixNodes:local.nodes,matrixEdges:local.edges.map(({history,...edge})=>edge),matrixUpdatedAt:p.matrixUpdatedAt||null};
+      matrixNodes:local.nodes,matrixEdges:local.edges.map(({history,...edge})=>edge),matrixUpdatedAt:p.matrixUpdatedAt||null,telemetry:p.telemetry||'detecting',protocolErrors:p.protocolErrors||0};
   }),control:{...control,results:control.results.slice()},recording:{directory,csvPath,csvDropped,error:recordingError}};
 }
-function receive(port, chunk) {
-  port.rxBytes += chunk.length;
-  // 原始字节先提交文件流，再解码；磁盘堵塞时显式计数，不拖住串口采集或渲染。
-  if (port.rawBlocked) port.rawDropped += chunk.length;
-  else if (!port.raw.write(chunk)) port.rawBlocked = true;
-  port.partial = Buffer.concat([port.partial, chunk]);
-  let at;
-  while ((at = port.partial.indexOf(10)) >= 0) {
-    const bytes = port.partial.subarray(0,at);
-    port.partial = port.partial.subarray(at+1);
-    const text = port.decoder.decode(bytes).replace(/\r$/,'');
-    line(port,text);
-    const result = model.ingest(text, port.path);
-    const localResult = port.model.ingest(text, port.path);
-    if(localResult?.type==='observation'&&localResult.fresh)port.matrixUpdatedAt=Date.now();
-    if (result?.type === 'observation') {
-      const r = result.record; port.nodeId = r.self;
-      if (csvBlocked) csvDropped++;
-      else if (!csv.write([Date.now(),port.path,r.self,r.boot,r.peer,r.peer_boot,r.update,r.distance_m,r.method,r.measurement_us,r.computed_us,r.age_us,r.valid].join(',')+'\r\n')) csvBlocked=true;
-    } else if (result?.type === 'status') {
-      port.nodeId = result.node.id;
-      if (control.pending && control.scope === 'connected' && control.paths.includes(port.path)) {
-        const f = result.fields, right = result.node.active === (control.action === 'start');
-        const explicit = control.action === 'start' ? ['started','already_running'].includes(f.result) || f.action === 'start' : f.result === 'stopped' || f.action === 'stop';
-        if (explicit) noteResult({node:result.node.id,active:result.node.active,result:right && !result.node.fault ? 'ok' : 'fault',via:'usb'});
-      }
-    } else if (result?.type === 'ack' && control.pending && control.scope === 'radio' &&
-               result.ack.request === control.requestId && result.ack.controller === control.controller) {
-      noteResult({...result.ack,via:'radio'});
-    } else if (result?.type === 'control' && control.pending && Number(result.fields.request) === control.requestId) {
-      if (result.fields.stage === 'failed') {control.error = result.fields.reason || '设备拒绝或发射失败';control.pending=false;}
+function record(port,result,time=Date.now()) {
+  if(!result)return;
+  if(result.fresh)port.matrixUpdatedAt=time;
+  const r=result.record;
+  if(csvBlocked)csvDropped++;
+  else if(!csv.write([time,port.path,r.node_a,r.node_b,r.distance_m,result.snapshot?'snapshot':'measurement'].join(',')+'\r\n'))csvBlocked=true;
+}
+function recover(port,reason) {
+  port.protocolErrors=(port.protocolErrors||0)+1;port.model.loseSync();
+  const now=Date.now();
+  if(now-(port.lastRecovery||0)<1000)return;port.lastRecovery=now;
+  line(port,reason+'，重新获取编号表与快照','system');
+  if(port.connected)write(port,'swarm snapshot').catch(()=>{});
+}
+function receiveLine(port,bytes) {
+  const text=port.decoder.decode(bytes).replace(/\r$/,'');if(!text)return;line(port,text);
+  const isMeasurement=/^@(SRV2 |SWARM_RANGE )/.test(text);
+  const result=isMeasurement&&['binary','negotiating'].includes(port.telemetry)?null:port.model.ingest(text,port.path);
+  if(result?.type==='observation'){record(port,result);return;}
+  // 汇总模型只维护明确身份及控制结果，距离必须保留各采集端口来源。
+  // 各端口模型独立维护元数据；汇总时附加 observer，不互相覆盖。
+  if(result?.type==='info'){
+    port.nodeId=result.node.id;
+    if(result.fields.telemetry==='1'&&!port.negotiated){
+      port.negotiated=true;port.telemetry='negotiating';clearTimeout(port.probeTimer);write(port,'swarm format binary').catch(()=>{});
     }
-  }
-  // 无换行的旧日志也有上限；不可让畸形串口无限占内存。
-  if (port.partial.length > 16384) {line(port,'无换行输入超过16KB，显示缓冲已清空','system');port.partial=Buffer.alloc(0);port.droppedUi++;}
+  }else if(fields(text,'@SWARM_FORMAT')?.mode==='binary'){
+    port.telemetry='binary';
+    // format binary 已由固件依序发送 RESET/MAP/SNAPSHOT，不重复请求造成队列冲突。
+  }else if(fields(text,'@SWARM_FORMAT')?.mode==='text'){port.telemetry='text';
+  }else if(result?.type==='status'){
+    port.nodeId=result.node.id;
+    if(control.pending&&control.scope==='connected'&&control.paths.includes(port.path)){
+      const f=result.fields,right=result.node.active===(control.action==='start');
+      const explicit=control.action==='start'?['started','already_running'].includes(f.result)||f.action==='start':f.result==='stopped'||f.action==='stop';
+      if(explicit)noteResult({node:result.node.id,active:result.node.active,result:right&&!result.node.fault?'ok':'fault',via:'usb'});
+    }
+  }else if(result?.type==='ack'&&control.pending&&control.scope==='radio'&&result.ack.request===control.requestId&&result.ack.controller===control.controller)noteResult({...result.ack,via:'radio'});
+  else if(result?.type==='control'&&control.pending&&Number(result.fields.request)===control.requestId&&result.fields.stage==='failed'){control.error=result.fields.reason||'设备拒绝或发射失败';control.pending=false;}
+}
+function receive(port,chunk) {
+  port.rxBytes+=chunk.length;
+  // 原始字节先提交文件流，再分帧；二进制测量不进入文本终端。
+  if(port.rawBlocked)port.rawDropped+=chunk.length;else if(!port.raw.write(chunk))port.rawBlocked=true;
+  port.framer.push(chunk);
 }
 function noteResult(result) {
   const at=control.results.findIndex(r=>r.node===result.node);
@@ -100,7 +119,12 @@ async function connect({path:portPath,baudRate=115200,encoding='auto'}) {
   const actual=encoding==='auto' ? (info.kind==='stm'?'gbk':'utf8') : encoding;
   const p=existing || {path:portPath,lines:[],delta:[],rxBytes:0,txBytes:0,rawDropped:0,droppedUi:0,model:new Model()};
   if(ports.size>=32&&!existing)throw Error('最多同时管理32个串口');
-  Object.assign(p,{kind:info.kind || 'unknown',baudRate,encoding,connected:false,error:'',wantReconnect:true,partial:Buffer.alloc(0),decoder:new TextDecoder(actual==='gbk'?'gb18030':'utf-8')});
+  p.model.reset();
+  Object.assign(p,{nodeId:null,negotiated:false,telemetry:'detecting',kind:info.kind || 'unknown',baudRate,encoding,connected:false,error:'',wantReconnect:true,partial:Buffer.alloc(0),decoder:new TextDecoder(actual==='gbk'?'gb18030':'utf-8')});
+  p.framer=new TelemetryFramer({onLine:bytes=>receiveLine(p,bytes),onFrame:frame=>{
+    if(frame.gap&&frame.type!==1&&frame.type!==4)return;
+    try{for(const result of p.model.ingestFrame(frame))record(p,result);}catch(error){recover(p,error.message);}
+  },onError:reason=>recover(p,reason)});
   const device = new SerialPort({path:portPath,baudRate,autoOpen:false,highWaterMark:65536});
   p.device=device;
   ports.set(portPath,p);
@@ -119,12 +143,14 @@ async function connect({path:portPath,baudRate=115200,encoding='auto'}) {
   await new Promise(resolve=>device.set({dtr:false,rts:false},()=>resolve()));
   p.connected=true;p.connectedAt=Date.now();
   line(p,`已连接 ${portPath} · ${baudRate} · ${actual}`,'system');
-  setTimeout(()=>{if(p.connected)write(p,'swarm status','crlf').catch(()=>{});},1600);
+  setTimeout(()=>{if(p.connected)write(p,'swarm info').catch(()=>{});},200);
+  clearTimeout(p.probeTimer);p.probeTimer=setTimeout(()=>{if(p.connected&&p.telemetry==='detecting'){p.telemetry='text';write(p,'swarm status').catch(()=>{});}},1800);
   return {connected:true,path:portPath};
 }
 async function disconnect(portPath) {
   const p=ports.get(portPath);if(!p)return {};
-  p.wantReconnect=false;
+  p.wantReconnect=false;clearTimeout(p.probeTimer);
+  if(p.connected&&['binary','negotiating'].includes(p.telemetry)){try{await write(p,'swarm format text');await new Promise(resolve=>p.device.drain(()=>resolve()));}catch{}}
   if(p.device.isOpen)await new Promise(resolve=>p.device.close(()=>resolve()));
   p.connected=false;p.raw?.end();return {connected:false,path:portPath};
 }
@@ -164,7 +190,7 @@ async function runControl({action,gateway,scope='radio'}) {
   if(!targets.length||targets.some(p=>!p?.connected))throw Error('请选择已连接的网关串口');
   if(scope==='radio'&&!targets[0].nodeId)throw Error('网关尚未报告RAC地址，请先查询节点状态');
   control={pending:true,action,scope,requestId,controller:targets[0].nodeId,deadline:Date.now()+6500,
-    expected:scope==='radio'?[...model.nodes.keys()]:targets.map(p=>p.nodeId).filter(Boolean),paths:targets.map(p=>p.path),results:[],timedOut:false,error:''};
+    expected:scope==='radio'?[...new Set(connected.flatMap(p=>[...p.model.nodes.keys()]))]:targets.map(p=>p.nodeId).filter(Boolean),paths:targets.map(p=>p.path),results:[],timedOut:false,error:''};
   for(const p of targets){
     const command=scope==='radio'?`broadcastsend swarm ${action} ${requestId}`:
       action==='start'?`swarm start ${(requestId^(p.nodeId||1))>>>0||1}`:'swarm stop';
@@ -194,12 +220,6 @@ parentPort.on('message',async ({id,method,args})=>{
   }catch(e){parentPort.postMessage({id,error:e.message});}
 });
 setInterval(()=>parentPort.postMessage({event:'snapshot',data:snapshot()}),100).unref();
-setInterval(()=>{
-  for(const p of ports.values()){
-    if(p.connected&&Date.now()-p.connectedAt>1800&&(p.pendingWrites||0)<4)
-      write(p,'swarm status').catch(()=>{});
-  }
-},2000).unref();
 setInterval(async()=>{
   for(const p of ports.values()){
     if(!p.wantReconnect||p.connected||p.reconnecting||!p.reconnectAt||Date.now()<p.reconnectAt)continue;

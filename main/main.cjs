@@ -7,8 +7,8 @@ const {createAcquisitionLog} = require('./acquisition-log.cjs');
 if(process.env.UWB_USER_DATA_DIR){fs.mkdirSync(process.env.UWB_USER_DATA_DIR,{recursive:true});app.setPath('userData',process.env.UWB_USER_DATA_DIR);}
 let window, worker, settingsPath, settings, closing=false, rpcId=1, recordingWarning='';
 const calls=new Map();
-const defaults={theme:'system',scope:'radio',gateway:null,quickVersion:2,quickCommands:[
-  {label:'节点状态',command:'swarm status'},{label:'邻居观测',command:'swarm neighbors'},
+const defaults={theme:'system',scope:'radio',gateway:null,quickVersion:3,quickCommands:[
+  {label:'节点信息',command:'swarm info'},{label:'矩阵快照',command:'swarm snapshot'},{label:'节点状态',command:'swarm status'},{label:'邻居观测',command:'swarm neighbors'},
   {label:'本机地址',command:'racaddr'},
   {label:'开启数据',command:'swarm stream on'},{label:'关闭数据',command:'swarm stream off'},
   {label:'停止本机测距',command:'swarm stop'},
@@ -45,6 +45,7 @@ else{
   app.whenReady().then(()=>{
     settingsPath=path.join(app.getPath('userData'),'settings.json');
     try{settings={...defaults,...JSON.parse(fs.readFileSync(settingsPath,'utf8'))};}catch{settings={...defaults};}
+    if(settings.quickVersion!==3&&Array.isArray(settings.quickCommands)){for(const q of [{label:'节点信息',command:'swarm info'},{label:'矩阵快照',command:'swarm snapshot'}])if(!settings.quickCommands.some(old=>old.command===q.command))settings.quickCommands.unshift(q);settings.quickVersion=3;}
     const legacyQuick=['swarm status','swarm neighbors','swarm stream on','swarm stream off','readreg 0','help'];
     if(Array.isArray(settings.quickCommands)&&settings.quickCommands.length===legacyQuick.length&&settings.quickCommands.every((q,i)=>q.command===legacyQuick[i]))settings.quickCommands=defaults.quickCommands.map(q=>({...q}));
     const stamp=new Date().toISOString().replace(/[:.]/g,'-');

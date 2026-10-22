@@ -4,3 +4,5 @@ test-results/
 recordings/
 *.log
 *.local.json
+
+release-diagonal/

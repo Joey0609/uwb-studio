@@ -9,7 +9,7 @@
     selected: null, activePort: null, discovered: [], selectedPorts: new Set(), busyPorts: new Set(),
     settings: { theme: 'system', quickCommands: [] }, terminal: new Map(), commandHistory: new Map(),
     lastRender: 0, dirty: true, chartDirty: true, portKey: '', nodeKey: '', matrixKey: '', detailKey: '',
-    terminalKey: '', terminalTabsKey: '', historyOptionsKey: '', quickKey: '', gatewayKey: '', controlKey: '', lineCache: new Map(),
+    terminalKey: '', terminalTabsKey: '', historyOptionsKey: '', quickKey: '', gatewayKey: '', controlKey: '', lineCache: new Map(), historyCache:new Map(),
     portElements: new Map(), matrixCells: new Map(), detailElements: new Map(), modalTheme: null,
     portMatrixKey: '', portMatrixElements: new Map(), portMatrixViews: new Map(),
   };
@@ -43,7 +43,7 @@
   const colorFor = (id, ids = state.snapshot.nodes.map(nodeId)) => COLORS[Math.max(0, ids.indexOf(String(id))) % COLORS.length];
   function ageLabel(ms) { if (!Number.isFinite(ms)) return '尚未更新'; return ms < 1000 ? `${Math.max(0, Math.round(ms))} ms 前` : `${(Math.max(0, ms) / 1000).toFixed(ms < 10000 ? 1 : 0)} s 前`; }
   function formatBytes(n) { const v = Number(n) || 0; return v < 1024 ? `${v} B` : v < 1024 * 1024 ? `${(v / 1024).toFixed(1)} KB` : `${(v / 1048576).toFixed(1)} MB`; }
-  function finiteDistance(e) { return Boolean(e && e.valid === true && Number.isFinite(Number(e.distance)) && Number(e.distance) >= 0 && (e.ageMs === undefined || Number(e.ageMs) < 3000)); }
+  function finiteDistance(e) { return Boolean(e && e.valid === true && Number.isFinite(Number(e.distance)) && Number(e.distance) >= 0 && (e.ageMs === undefined || Number(e.ageMs) + Math.max(0, Date.now() - Number(state.snapshot.now || Date.now())) < 1000)); }
   function measurement(e) { return finiteDistance(e) ? Number(e.distance).toFixed(3) : '—'; }
   function terminalState(path) {
     if (!state.terminal.has(path)) state.terminal.set(path, { paused: false, frozen: [], cleared: new Set(), historyIndex: -1, draft: '' });
@@ -164,47 +164,28 @@
       $('node-tabs').replaceChildren(...children); state.matrixKey = ''; state.detailKey = ''; state.historyOptionsKey = '';
     }
     $('node-tabs').querySelectorAll('button').forEach(b => b.classList.toggle('active', (b.dataset.node || null) === state.selected));
-    const table = $('distance-matrix'); const ids = nodes.map(nodeId);
-    const matrixKey = ids.join('|');
-    if (matrixKey !== state.matrixKey) {
-      state.matrixKey = matrixKey; state.matrixCells.clear(); const head = element('thead'); const headerRow = element('tr');
-      headerRow.append(element('th', '', '节点 / 目标'));
-      ids.forEach(id => { const th = element('th', '', id); th.scope = 'col'; headerRow.append(th); }); head.append(headerRow);
-      const body = element('tbody');
-      nodes.forEach(n => {
-        const id = nodeId(n); const row = element('tr'); const th = element('th'); th.scope = 'row';
-        const choose = button('', 'matrix-row-head', null, () => selectNode(id)); choose.replaceChildren();
-        const label = element('span', 'matrix-node-id'); const dot = element('span', 'status-dot'); dot.style.background = colorFor(id); dot.style.boxShadow = 'none'; label.append(dot, document.createTextNode(id));
-        const kind = element('span', 'matrix-node-kind', kindLabel(state.snapshot.ports.find(p => p.path === n.port)?.kind)); choose.append(label, kind); th.append(choose); row.append(th);
-        ids.forEach(peer => {
-          const td = element('td'); const value = element('div', 'cell-value', id === peer ? '0' : '—');
-          const unit = element('div', 'cell-unit', 'm'); td.append(value, unit); td.classList.toggle('diagonal', id === peer);
-          if (id !== peer) { td.tabIndex = 0; td.addEventListener('click', () => selectNode(id)); td.addEventListener('keydown', e => { if (e.key === 'Enter') selectNode(id); }); }
-          row.append(td); state.matrixCells.set(`${id}>${peer}`, { td, value, unit });
-        }); body.append(row);
-      }); table.replaceChildren(head, body);
-      table.style.minWidth = `${Math.max(440, ids.length * 108 + 145)}px`;
+    // 汇总区按当前选中的观察串口显示，绝不把不同观察者的值合成一格。
+    const observed=currentPort()||state.snapshot.ports[0];
+    const table=$('distance-matrix');const axes=observed?matrixAxes(observed):[];const ids=axes.map(nodeId);
+    const matrixKey=(observed?.path||'')+ids.join('|');
+    if(matrixKey!==state.matrixKey){
+      state.matrixKey=matrixKey;state.matrixCells.clear();const head=element('thead'),tr=element('tr');tr.append(element('th','','节点 / 对端'));ids.forEach(id=>tr.append(element('th','',id)));head.append(tr);const body=element('tbody');
+      ids.forEach((id,i)=>{const row=element('tr');row.append(element('th','',id));ids.forEach((peer,j)=>{const td=element('td'),value=element('div','cell-value'),unit=element('div','cell-unit');td.append(value,unit);row.append(td);state.matrixCells.set(`${id}>${peer}`,{td,value,unit,blocked:j<i,diagonal:j===i});});body.append(row);});table.replaceChildren(head,body);
     }
-    table.hidden = nodes.length === 0; $('matrix-empty').hidden = nodes.length > 0;
-    const edges = new Map(state.snapshot.edges.map(e => [`${idOf(e.source)}>${idOf(e.peer)}`, e]));
-    for (const [key, ui] of state.matrixCells) {
-      const [source, peer] = key.split('>'); const edge = edges.get(key); const diagonal = source === peer;
-      text(ui.value, diagonal ? '0' : measurement(edge));
-      ui.td.classList.toggle('selected', source === state.selected);
-      ui.td.classList.toggle('valid', !diagonal && finiteDistance(edge));
-      ui.td.classList.toggle('unknown', !diagonal && !finiteDistance(edge));
-      ui.td.title = diagonal ? '同一节点：0 m' : edge ? `${source} → ${peer}\n${finiteDistance(edge) ? `${Number(edge.distance).toFixed(3)} m` : '未知或已过期'} · ${ageLabel(Number(edge.ageMs))}\n${edge.method === 'compensatory' ? '补偿测距' : '常规测距'}` : `${source} → ${peer}：尚无独立测量`;
-    }
+    table.hidden=!ids.length;$('matrix-empty').hidden=!!ids.length;
+    const edges=new Map((observed?.matrixEdges||[]).map(e=>[pairKey(e.source,e.peer),e]));
+    for(const[key,ui]of state.matrixCells){const[a,b]=key.split('>'),edge=edges.get(pairKey(a,b));text(ui.value,ui.blocked?'':ui.diagonal?'—':measurement(edge));text(ui.unit,ui.blocked||ui.diagonal?'':'m');ui.td.classList.toggle('masked-cell',ui.blocked);ui.td.classList.toggle('diagonal-cell',ui.diagonal);ui.td.classList.toggle('valid',!ui.blocked&&!ui.diagonal&&finiteDistance(edge));ui.td.classList.toggle('unknown',!ui.blocked&&!ui.diagonal&&!finiteDistance(edge));ui.td.title=ui.blocked?'':`${observed?.path||''} ${a} ↔ ${b}`;}
     renderDetail();
   }
   function matrixAxes(port) {
     const ids = new Map();
     const add = n => { const id = typeof n === 'object' && n !== null ? nodeId(n) : idOf(n); if (id && !ids.has(id)) ids.set(id, typeof n === 'object' ? n : { id }); };
-    state.snapshot.nodes.forEach(add); (Array.isArray(port.matrixNodes) ? port.matrixNodes : []).forEach(add);
+    (Array.isArray(port.matrixNodes) ? port.matrixNodes : []).forEach(add);
     if (port.nodeId) add(port.nodeId);
     for (const edge of Array.isArray(port.matrixEdges) ? port.matrixEdges : []) { add(edge.source); add(edge.peer); }
-    return [...ids.values()];
+    return [...ids.values()].sort((a,b)=>Number(nodeId(a))-Number(nodeId(b)));
   }
+  function pairKey(a,b){return [String(a),String(b)].sort((x,y)=>Number(x)-Number(y)).join('>');}
   function portView(port) {
     let view = state.portMatrixViews.get(port.path);
     if (!view) { view = { paused: false, frozen: null }; state.portMatrixViews.set(port.path, view); }
@@ -226,27 +207,27 @@
     selectNode(idOf(port.nodeId)); $('aggregate-view').open = true;
     $('aggregate-view').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
   }
-  /** 每张矩阵只读该串口的matrixEdges；统一节点表仅用于坐标轴，禁止回退汇总边。 */
+  /** 每张矩阵只读该串口的matrixEdges；坐标轴和结果均来自本端口，禁止使用其他串口填补。 */
   function renderPortMatrices() {
     const ports = state.snapshot.ports; const key = ports.map(p => p.path).join('|'); const grid = $('port-matrix-grid');
     if (key !== state.portMatrixKey) {
       state.portMatrixKey = key; state.portMatrixElements.clear();
       grid.replaceChildren(); grid.dataset.count = String(Math.min(3, Math.max(1, ports.length)));
-      if (!ports.length) { const empty = element('div', 'empty-state port-matrix-empty'); empty.append(icon('radio'), element('h3', '', '连接设备，同时查看各自的距离矩阵'), element('p', '', '每张卡只显示该串口收到的观测，未上报的方向保留为空。'), button('连接设备', 'button primary', 'plus', () => openPorts())); grid.append(empty); }
+      if (!ports.length) { const empty = element('div', 'empty-state port-matrix-empty'); empty.append(icon('radio'), element('h3', '', '连接设备，同时查看各自的距离矩阵'), element('p', '', '每张卡只显示该串口收到的观测，未收到的节点对显示 —。'), button('连接设备', 'button primary', 'plus', () => openPorts())); grid.append(empty); }
       for (const port of ports) {
         const card = element('article', 'port-matrix-card'); card.dataset.port = port.path;
         const heading = element('div', 'port-matrix-heading'); const titles = element('div'); const name = element('h3', '', port.path); const identity = element('p', 'port-matrix-identity'); titles.append(name, identity);
         const pause = button('暂停显示', 'button small port-matrix-pause', 'pause', () => togglePortMatrix(port.path)); pause.setAttribute('aria-label', `${port.path} 暂停或恢复矩阵显示`); heading.append(titles, pause);
         const timing = element('div', 'port-matrix-timing'); const updated = element('span', 'port-matrix-updated'); const age = element('span', 'port-matrix-age'); timing.append(updated, age);
         const scroll = element('div', 'port-matrix-scroll'); const table = element('table', 'distance-matrix port-distance-matrix'); table.setAttribute('aria-label', `${port.path} 独立距离矩阵`); scroll.append(table);
-        const note = element('p', 'port-matrix-note', '上报节点 ↓ / 对端节点 → · 单位 m · 未上报的方向为空');
+        const note = element('p', 'port-matrix-note', '无向节点对 · 右上三角显示距离 · 对角线 — · 1 秒未更新显示 —');
         const footer = element('div', 'port-matrix-footer'); const status = element('span', 'port-matrix-status');
         const actions = element('div'); const node = button('节点控制', 'text-button', 'node', () => openPortNode(port.path)); const terminal = button('终端', 'text-button', 'terminal', () => openPortTerminal(port.path)); actions.append(node, terminal); footer.append(status, actions);
         card.append(heading, timing, scroll, note, footer); grid.append(card);
         state.portMatrixElements.set(port.path, { card, identity, pause, updated, age, table, status, node, axesKey: '', cells: new Map() });
       }
     }
-    const now = Number(state.snapshot.now) || Date.now();
+    const now = Date.now();
     for (const port of ports) {
       const ui = state.portMatrixElements.get(port.path); if (!ui) continue;
       const view = portView(port); const axes = view.paused ? view.frozen.nodes : matrixAxes(port); const axesKey = axes.map(nodeId).join('|');
@@ -255,7 +236,7 @@
       const elapsed = view.paused ? Math.max(0, now - view.frozen.at) : 0;
       const edges = new Map(rawEdges.map(e => {
         const ageMs = (Number.isFinite(Number(e.ageMs)) ? Number(e.ageMs) : updatedAt ? Math.max(0, (view.paused ? view.frozen.at : now) - Number(updatedAt)) : Infinity) + elapsed;
-        return [`${idOf(e.source)}>${idOf(e.peer)}`, { ...e, ageMs, valid: e.valid === true && port.connected && ageMs < 3000 }];
+        return [pairKey(e.source,e.peer), { ...e, ageMs, valid: e.valid === true && port.connected && ageMs < 1000 }];
       }));
       text(ui.identity, `${kindLabel(port.kind)} · RAC ${port.nodeId || '等待识别'}`);
       text(ui.updated, updatedAt ? `更新 ${timeText(updatedAt)}` : '更新 —');
@@ -275,12 +256,11 @@
         ui.table.replaceChildren(head, body); ui.table.style.minWidth = `${Math.max(320, axes.length * 78 + 100)}px`;
       }
       for (const [cellKey, cell] of ui.cells) {
-        const [source, peer] = cellKey.split('>'); const diagonal = source === peer; const edge = edges.get(cellKey); const valid = !diagonal && finiteDistance(edge);
-        text(cell.value, diagonal ? '0' : valid ? Number(edge.distance).toFixed(3) : '—');
-        text(cell.unit, diagonal ? 'm' : valid ? `m · ${Math.round(edge.ageMs)} ms` : 'm');
-        cell.cell.classList.toggle('diagonal', diagonal); cell.cell.classList.toggle('valid', valid); cell.cell.classList.toggle('unknown', !diagonal && !valid);
-        cell.cell.classList.toggle('selected', !diagonal && source === idOf(port.nodeId));
-        cell.cell.title = diagonal ? '同一节点：0 m' : edge ? `${port.path} 独立接收\n${source} → ${peer}：${valid ? `${Number(edge.distance).toFixed(3)} m` : '未知或已过期'}\n测量年龄 ${Math.round(edge.ageMs)} ms${edge.received ? `\n接收时间 ${timeText(edge.received)}` : ''}${view.paused ? '\n暂停显示，后台采集仍在继续' : ''}` : `${port.path} 未上报 ${source} → ${peer}，不使用其他串口填补`;
+        const [source,peer]=cellKey.split('>');const blocked=Number(peer)<Number(source),diagonal=source===peer;const edge=edges.get(pairKey(source,peer));const valid=!blocked&&!diagonal&&finiteDistance(edge);
+        text(cell.value,blocked?'':valid?Number(edge.distance).toFixed(3):'—');text(cell.unit,blocked||diagonal?'':valid?`m · ${Math.round(edge.ageMs)} ms`:'m');
+        cell.cell.classList.toggle('masked-cell',blocked);cell.cell.classList.toggle('diagonal-cell',diagonal);cell.cell.classList.toggle('valid',valid);cell.cell.classList.toggle('unknown',!blocked&&!diagonal&&!valid);cell.cell.classList.remove('diagonal','selected');
+        cell.cell.title=blocked?'':`${port.path} 独立观测\n${source} ↔ ${peer}：${valid?Number(edge.distance).toFixed(3)+' m':'未知或已过期'}${edge?.received?'\n接收时间 '+timeText(edge.received):''}`;
+
       }
     }
   }
@@ -295,8 +275,8 @@
       return;
     }
     const id = nodeId(n); const port = state.snapshot.ports.find(p => p.path === n.port);
-    const edges = state.snapshot.edges.filter(e => idOf(e.source) === id && idOf(e.peer) !== id);
-    const detailKey = `${id}|${n.port}|${edges.map(e => idOf(e.peer)).join('|')}`;
+    const edges=state.snapshot.edges.filter(e=>e.observer===n.port);
+    const detailKey = `${id}|${n.port}|${edges.map(e => pairKey(e.source,e.peer)).join('|')}`;
     if (state.detailKey !== detailKey) {
       state.detailKey = detailKey; state.detailElements.clear(); host.replaceChildren();
       const identity = element('div', 'node-identity'); const chip = element('div', 'device-chip'); const titles = element('div');
@@ -306,12 +286,12 @@
       if (!edges.length) observations.append(element('p', 'muted', '等待该节点上报到其他节点的距离。'));
       for (const edge of edges) {
         const card = element('div', 'observation'); const title = element('div', 'observation-heading');
-        title.append(icon('arrow'), element('span', 'observation-peer', idOf(edge.peer))); const badge = element('span', 'method-badge'); title.append(badge);
+        title.append(icon('arrow'),element('span','observation-peer',`${edge.source} ↔ ${edge.peer}`));const badge=element('span');badge.hidden=true;
         const value = element('div', 'observation-value'); const number = element('span'); value.append(number, element('small', '', 'm'));
         const age = element('div', 'observation-age'); card.append(title, value, age); observations.append(card);
-        state.detailElements.set(idOf(edge.peer), { number, badge, age });
+        state.detailElements.set(pairKey(edge.source,edge.peer), { number, badge, age });
       }
-      host.append(observations); const note = element('p', 'detail-note'); note.append(icon('info'), document.createTextNode('本节点向其他节点的观测（有向测距）')); host.append(note);
+      host.append(observations); const note = element('p', 'detail-note'); note.append(icon('info'), document.createTextNode('该设备独立重建的节点对距离')); host.append(note);
       const controls = element('div', 'node-controls'); const actions = element('div', 'node-buttons');
       actions.append(button('开始', 'button small primary', 'play', () => sendNode('start')), button('停止', 'button small', 'stop', () => sendNode('stop')), button('状态', 'button small', null, () => sendNode('status'))); controls.append(actions);
       const configuration = element('details', 'node-configuration'); const summary = element('summary', '', '节点配置'); configuration.append(summary);
@@ -324,15 +304,15 @@
     }
     const status = $('detail-active'); text(status, n.active === true ? '● 测距运行中' : n.active === false ? '○ 已停止' : '○ 状态待确认'); status.classList.toggle('inactive', !n.active);
     for (const edge of edges) {
-      const ui = state.detailElements.get(idOf(edge.peer)); if (!ui) continue;
-      text(ui.number, measurement(edge)); text(ui.badge, edge.method === 'compensatory' ? '补偿' : '常规'); ui.badge.classList.toggle('compensatory', edge.method === 'compensatory');
+      const ui = state.detailElements.get(pairKey(edge.source,edge.peer)); if (!ui) continue;
+      text(ui.number,measurement(edge));
       text(ui.age, `${finiteDistance(edge) ? '测量更新' : '观测过期'} ${ageLabel(Number(edge.ageMs))}`);
     }
     text($('apply-node-period'), n.active ? '停止并应用' : '应用');
     const canControl = Boolean(port?.connected);
     host.querySelectorAll('button,input').forEach(e => { e.disabled = !canControl; });
     if ($('node-stream') !== document.activeElement) { const stream = n.stream ?? port?.stream; $('node-stream').checked = Boolean(stream); $('node-stream').indeterminate = stream === undefined || stream === null; text($('node-stream-label'), stream === undefined || stream === null ? '实时输出（状态未知）' : '实时输出测量结果'); }
-    const stats = n.stats || {}; const metaValues = [`会话 ${n.boot ?? '—'}`, `周期 ${n.periodMs ?? port?.periodMs ?? '—'} ms`, `常规 ${stats.regular ?? '—'}`, `补偿 ${stats.compensatory ?? '—'}`];
+    const stats = n.stats || {}; const metaValues=[`周期 ${n.periodMs??port?.periodMs??'—'} ms`,`回传 ${port?.telemetry==='binary'?'紧凑二进制':port?.telemetry==='text'?'文本':'识别中'}`];
     const meta = $('node-meta'); if (meta.dataset.key !== metaValues.join('|')) { meta.dataset.key = metaValues.join('|'); meta.replaceChildren(...metaValues.map(v => element('span', '', v))); }
   }
   function randomSession() { const data = new Uint32Array(1); crypto.getRandomValues(data); return data[0] || 1; }
@@ -379,14 +359,13 @@
     }, action === 'start' ? $('network-start') : $('network-stop'));
   }
 
-  function relevantEdges() { return state.snapshot.edges.filter(e => state.selected === null || idOf(e.source) === state.selected); }
-  function renderHistoryOptions() {
-    text($('history-source'), state.selected ? `${state.selected} → 各节点` : '全部节点独立观测');
-    const edges = relevantEdges(); const key = `${state.selected}|${edges.map(e => `${e.source}>${e.peer}`).join('|')}`;
-    if (state.historyOptionsKey === key) return; state.historyOptionsKey = key;
-    const select = $('history-peer'); const old = select.value; select.replaceChildren(new Option('全部目标', ''));
-    for (const e of edges) select.add(new Option(state.selected ? String(e.peer) : `${e.source} → ${e.peer}`, `${e.source}>${e.peer}`));
-    if ([...select.options].some(o => o.value === old)) select.value = old;
+  function relevantEdges(){const path=$('history-port').value||state.activePort;return state.snapshot.edges.filter(e=>e.observer===path);}
+  function renderHistoryOptions(){
+    const ports=$('history-port'),oldPort=ports.value;const pk=state.snapshot.ports.map(p=>p.path+':'+p.nodeId).join('|');
+    if(ports.dataset.key!==pk){ports.dataset.key=pk;ports.replaceChildren(...state.snapshot.ports.map(p=>new Option(`${p.path} · ${p.nodeId||'等待识别'}`,p.path)));if([...ports.options].some(o=>o.value===oldPort))ports.value=oldPort;else if(state.activePort)ports.value=state.activePort;}
+    text($('history-source'),ports.value?`${ports.value} 独立观测`:'等待串口');
+    const edges=relevantEdges(),key=ports.value+'|'+edges.map(e=>pairKey(e.source,e.peer)).join('|');if(state.historyOptionsKey===key)return;state.historyOptionsKey=key;
+    const select=$('history-peer'),old=select.value;select.replaceChildren(new Option('全部节点对',''));for(const e of edges)select.add(new Option(`${e.source} ↔ ${e.peer}`,pairKey(e.source,e.peer)));if([...select.options].some(o=>o.value===old))select.value=old;
   }
   function renderChart() {
     const canvas = $('history-chart'); const ctx = canvas.getContext('2d'); if (!ctx) return;
@@ -395,7 +374,7 @@
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, w, h);
     const style = getComputedStyle(document.documentElement); const muted = style.getPropertyValue('--muted').trim(); const line = style.getPropertyValue('--line').trim();
     const now = Number(state.snapshot.now) || Date.now(); const range = Number($('history-window').value); const start = now - range;
-    const filter = $('history-peer').value; const edges = relevantEdges().filter(e => !filter || `${e.source}>${e.peer}` === filter);
+    const filter = $('history-peer').value; const edges = relevantEdges().filter(e => !filter || pairKey(e.source,e.peer) === filter);
     const series = edges.map((e, i) => ({ edge: e, color: COLORS[i % COLORS.length], points: (Array.isArray(e.history) ? e.history : []).slice(-1800).filter(p => Number(p.t) >= start && Number(p.t) <= now) }));
     let max = 0, min = Infinity, pointCount = 0;
     for (const s of series) for (const p of s.points) if (Number.isFinite(p.v) && p.v >= 0) { min = Math.min(min, p.v); max = Math.max(max, p.v); pointCount++; }
@@ -408,7 +387,7 @@
     for (let i = 0; i < 5; i++) { ctx.textAlign = i === 0 ? 'left' : i === 4 ? 'right' : 'center'; ctx.fillText(new Date(start + i * range / 4).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', ...(range <= 60000 ? { second: '2-digit' } : {}) }), left + i * width / 4, h - 6); }
     for (const s of series) {
       const stride = Math.max(1, Math.ceil(s.points.length / 600)); const period = state.snapshot.nodes.find(n => nodeId(n) === idOf(s.edge.source))?.periodMs || 200;
-      const maxGap = Math.max(1000, Number(period) * 4); let previous = null, lastRawTime = null, broken = true; ctx.beginPath(); ctx.strokeStyle = s.color; ctx.lineWidth = 1.7;
+      const maxGap = 1000; let previous = null, lastRawTime = null, broken = true; ctx.beginPath(); ctx.strokeStyle = s.color; ctx.lineWidth = 1.7;
       for (let i = 0; i < s.points.length; i++) {
         const p = s.points[i];
         if (!Number.isFinite(p.v) || p.v < 0) { previous = null; lastRawTime = null; broken = true; continue; }
@@ -424,7 +403,7 @@
     const legendKey = series.map(s => `${s.edge.source}>${s.edge.peer}:${measurement(s.edge)}`).join('|');
     if ($('chart-legend').dataset.key !== legendKey) {
       $('chart-legend').dataset.key = legendKey;
-      $('chart-legend').replaceChildren(...series.map(s => { const item = element('span', 'legend-item'); const dot = element('i', 'legend-dot'); dot.style.background = s.color; item.append(dot, document.createTextNode(`${state.selected ? '' : `${s.edge.source} → `}${s.edge.peer}  ${measurement(s.edge)} m`)); return item; }));
+      $('chart-legend').replaceChildren(...series.map(s => { const item = element('span', 'legend-item'); const dot = element('i', 'legend-dot'); dot.style.background = s.color; item.append(dot, document.createTextNode(`${s.edge.source} ↔ ${s.edge.peer}  ${measurement(s.edge)} m`)); return item; }));
     }
   }
 
@@ -589,10 +568,17 @@
       } else lines = incoming.slice(-500);
       state.lineCache.set(p.path, lines); return { ...p, lines };
     });
-    nextSnapshot = { ...snapshot, ports: mergedPorts };
+    const edgeKeys=new Set();const mergedEdges=(snapshot.edges||[]).map(edge=>{
+      const key=`${edge.observer}/${pairKey(edge.source,edge.peer)}`;edgeKeys.add(key);
+      const old=state.historyCache.get(key)||[];const seen=new Set(old.map(point=>point.id));
+      const history=(snapshot.historyDelta?old.concat((edge.history||[]).filter(point=>!seen.has(point.id))):(edge.history||[])).slice(-600);
+      state.historyCache.set(key,history);return {...edge,history};
+    });
+    for(const key of state.historyCache.keys())if(!edgeKeys.has(key))state.historyCache.delete(key);
+    nextSnapshot = { ...snapshot, edges:mergedEdges, ports: mergedPorts };
   }
   function frameLoop(t) {
-    if (t - state.lastRender >= 100 && (state.dirty || nextSnapshot)) {
+    if (t - state.lastRender >= 100) {
       if (nextSnapshot) { state.snapshot = { ports: [], nodes: [], edges: [], control: {}, recording: {}, ...nextSnapshot }; nextSnapshot = null; state.chartDirty = true; }
       state.lastRender = t; state.dirty = false; render();
       if (state.chartDirty) { renderChart(); state.chartDirty = false; }
@@ -616,6 +602,7 @@
   $('network-start').addEventListener('click', () => networkControl('start')); $('network-stop').addEventListener('click', () => networkControl('stop'));
   $('control-scope').addEventListener('change', e => run(async () => { state.settings.scope = e.target.value; if (api) await api.setSettings({ scope: e.target.value }); }));
   $('gateway').addEventListener('change', e => run(async () => { state.settings.gateway = e.target.value || null; if (api) await api.setSettings({ gateway: state.settings.gateway }); }));
+  $('history-port').addEventListener('change',()=>{state.historyOptionsKey='';state.chartDirty=true;state.dirty=true;});
   $('history-window').addEventListener('change', () => { state.chartDirty = true; state.dirty = true; }); $('history-peer').addEventListener('change', () => { state.chartDirty = true; state.dirty = true; });
   $('terminal-filter').addEventListener('input', () => { state.dirty = true; }); $('terminal-direction').addEventListener('change', () => { state.dirty = true; });
   $('pause-terminal').addEventListener('click', () => { const p = currentPort(); if (!p) return; const local = terminalState(p.path); local.paused = !local.paused; if (local.paused) local.frozen = (p.lines || []).slice(-500); else local.frozen = []; state.dirty = true; });
