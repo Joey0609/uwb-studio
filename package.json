@@ -1,0 +1,43 @@
+{
+  "name": "uwb-studio",
+  "version": "1.0.0",
+  "description": "UWB广播测距多串口工作台",
+  "private": true,
+  "main": "main/main.cjs",
+  "author": "UWB Studio",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "serialport": "13.0.0"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "local.uwb.studio",
+    "productName": "UWB Studio",
+    "asar": true,
+    "files": [
+      "main/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "assets/icon.ico",
+      "signExecutable": false
+    },
+    "artifactName": "UWB-Studio-${version}-${arch}.${ext}"
+  }
+}

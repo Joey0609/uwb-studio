@@ -1,0 +1,6 @@
+node_modules/
+release/
+test-results/
+recordings/
+*.log
+*.local.json

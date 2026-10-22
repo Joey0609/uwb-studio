@@ -1,0 +1,655 @@
+'use strict';
+
+(() => {
+  const api = window.uwb;
+  const $ = id => document.getElementById(id);
+  const COLORS = ['#199b79', '#e49660', '#9985ce', '#5599bd', '#d37b94', '#9aaa52', '#50b7b2', '#a48c73'];
+  const state = {
+    snapshot: { ports: [], nodes: [], edges: [], control: {}, recording: {}, now: Date.now() },
+    selected: null, activePort: null, discovered: [], selectedPorts: new Set(), busyPorts: new Set(),
+    settings: { theme: 'system', quickCommands: [] }, terminal: new Map(), commandHistory: new Map(),
+    lastRender: 0, dirty: true, chartDirty: true, portKey: '', nodeKey: '', matrixKey: '', detailKey: '',
+    terminalKey: '', terminalTabsKey: '', historyOptionsKey: '', quickKey: '', gatewayKey: '', controlKey: '', lineCache: new Map(),
+    portElements: new Map(), matrixCells: new Map(), detailElements: new Map(), modalTheme: null,
+    portMatrixKey: '', portMatrixElements: new Map(), portMatrixViews: new Map(),
+  };
+  let nextSnapshot = null;
+  let toastTimer = null;
+  let resizeObserver = null;
+
+  function element(tag, className, text) {
+    const e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+  function icon(name) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', `#i-${name}`); svg.append(use); svg.setAttribute('aria-hidden', 'true'); return svg;
+  }
+  function button(label, className = 'button', iconName, action) {
+    const b = element('button', className); b.type = 'button';
+    if (iconName) b.append(icon(iconName)); b.append(element('span', '', label));
+    if (action) b.addEventListener('click', action); return b;
+  }
+  function text(e, value) { const next = String(value ?? ''); if (e && e.textContent !== next) e.textContent = next; }
+  const nodeId = n => String(n.id ?? n.nodeId ?? '');
+  const idOf = value => String(value ?? '');
+  const connectedPorts = () => state.snapshot.ports.filter(p => p.connected);
+  const currentNode = () => state.snapshot.nodes.find(n => nodeId(n) === state.selected);
+  const currentPort = () => state.snapshot.ports.find(p => p.path === state.activePort);
+  const kindLabel = kind => /^stm/i.test(kind || '') ? 'STM32' : /^esp/i.test(kind || '') ? 'ESP32-C6' : kind === 'probe' ? '调试探针' : '设备类型待识别';
+  const colorFor = (id, ids = state.snapshot.nodes.map(nodeId)) => COLORS[Math.max(0, ids.indexOf(String(id))) % COLORS.length];
+  function ageLabel(ms) { if (!Number.isFinite(ms)) return '尚未更新'; return ms < 1000 ? `${Math.max(0, Math.round(ms))} ms 前` : `${(Math.max(0, ms) / 1000).toFixed(ms < 10000 ? 1 : 0)} s 前`; }
+  function formatBytes(n) { const v = Number(n) || 0; return v < 1024 ? `${v} B` : v < 1024 * 1024 ? `${(v / 1024).toFixed(1)} KB` : `${(v / 1048576).toFixed(1)} MB`; }
+  function finiteDistance(e) { return Boolean(e && e.valid === true && Number.isFinite(Number(e.distance)) && Number(e.distance) >= 0 && (e.ageMs === undefined || Number(e.ageMs) < 3000)); }
+  function measurement(e) { return finiteDistance(e) ? Number(e.distance).toFixed(3) : '—'; }
+  function terminalState(path) {
+    if (!state.terminal.has(path)) state.terminal.set(path, { paused: false, frozen: [], cleared: new Set(), historyIndex: -1, draft: '' });
+    return state.terminal.get(path);
+  }
+  function toast(message, error = false) {
+    const host = $('toast-region');
+    const e = element('div', `toast${error ? ' error' : ''}`, message); host.replaceChildren(e);
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => host.replaceChildren(), error ? 7000 : 4000);
+  }
+  function errorText(error) { return error?.message || String(error || '操作失败'); }
+  async function copyText(value) {
+    if (api?.copyText) { checkResult(await api.copyText(value)); return; }
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(value); return; } catch (_) { /* 沙箱可能禁用权限，保留用户手势复制回退。 */ }
+    }
+    const previous = document.activeElement; const area = element('textarea'); area.value = value;
+    area.readOnly = true; area.style.position = 'fixed'; area.style.left = '-10000px'; area.style.top = '0';
+    document.body.append(area); area.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } finally { area.remove(); previous?.focus(); }
+    if (!copied) throw new Error('系统未允许复制。可以选中终端文本后使用 Ctrl+C。');
+  }
+  function requireApi() { if (!api) throw new Error('请在 UWB Studio 桌面应用中连接串口。'); }
+  function checkResult(result) {
+    if (result && (result.ok === false || result.success === false)) throw new Error(result.error || result.message || '设备操作失败');
+    return result;
+  }
+  async function run(task, control) {
+    if (control) control.disabled = true;
+    try { return await task(); } catch (error) { toast(errorText(error), true); return null; }
+    finally { if (control) control.disabled = false; state.dirty = true; }
+  }
+  function timeText(value) {
+    const d = new Date(value); if (!Number.isFinite(d.getTime())) return '';
+    return `${d.toLocaleTimeString('zh-CN', { hour12: false })}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  }
+  function applyTheme(choice) {
+    const dark = choice === 'dark' || (choice === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    $('theme-select').value = choice;
+    $('theme-toggle').title = `当前：${choice === 'system' ? '跟随系统' : dark ? '深色' : '浅色'}，点击切换`;
+    state.chartDirty = true;
+    document.querySelectorAll('[data-theme-choice]').forEach(b => b.classList.toggle('active', b.dataset.themeChoice === choice));
+    window.UwbDropdowns?.refreshAll();
+  }
+  async function saveTheme(choice) {
+    state.settings.theme = choice; applyTheme(choice);
+    if (api) await api.setSettings({ theme: choice });
+  }
+  function ensurePortSelection() {
+    const ports = state.snapshot.ports;
+    if (!ports.some(p => p.path === state.activePort)) state.activePort = ports.find(p => p.connected)?.path || ports[0]?.path || null;
+    if (state.selected !== null && !state.snapshot.nodes.some(n => nodeId(n) === state.selected)) state.selected = null;
+  }
+
+  function renderPorts() {
+    const ports = state.snapshot.ports;
+    const key = ports.map(p => p.path).join('|');
+    if (key !== state.portKey) {
+      state.portKey = key; state.portElements.clear();
+      const children = [];
+      for (const p of ports) {
+        const card = element('article', 'port-card');
+        const top = element('div', 'port-card-top'); const chip = element('div', 'device-chip');
+        const title = element('div'); const name = element('div', 'port-name', p.path); const baud = element('small'); name.append(baud);
+        const device = element('div', 'port-device'); title.append(name, device);
+        const connect = button('断开', 'button port-connect', null, () => togglePort(p.path)); top.append(chip, title, connect);
+        const status = element('div', 'port-status'); const dot = element('span', 'status-dot');
+        const label = element('span'); const counters = element('span', 'port-counters'); status.append(dot, label, counters);
+        const error = element('p', 'port-error'); card.append(top, status, error); children.push(card);
+        state.portElements.set(p.path, { card, baud, device, connect, label, dot, counters, error });
+      }
+      const add = button('添加串口', 'add-port', 'plus', () => openPorts()); add.id = 'add-port'; children.push(add);
+      $('port-strip').replaceChildren(...children);
+    }
+    for (const p of ports) {
+      const ui = state.portElements.get(p.path); if (!ui) continue;
+      text(ui.baud, p.baudRate || $('default-baud').value);
+      text(ui.device, `${kindLabel(p.kind)}${p.nodeId ? ` · ${p.nodeId}` : ''}`);
+      text(ui.connect.firstChild, p.connected ? '断开' : '连接'); ui.connect.disabled = state.busyPorts.has(p.path);
+      text(ui.label, p.connected ? '已连接' : '未连接'); ui.dot.classList.toggle('neutral', !p.connected);
+      text(ui.counters, `↓ ${formatBytes(p.rxBytes)}  ↑ ${formatBytes(p.txBytes)}`);
+      const losses = [p.dropped ? `原始记录丢弃 ${formatBytes(p.dropped)}` : '', p.droppedUi ? `显示缓冲丢弃 ${p.droppedUi} 条` : ''].filter(Boolean);
+      text(ui.error, p.error || losses.join(' · ')); ui.error.hidden = !ui.error.textContent;
+    }
+    const count = connectedPorts().length;
+    text($('port-count'), `${count} / ${ports.length}`);
+    text($('capture-status').lastChild, count ? `${count} 个串口采集中` : '等待连接');
+    $('capture-status').querySelector('.status-dot').classList.toggle('neutral', count === 0);
+    const gatewayKey = ports.filter(p => p.connected).map(p => `${p.path}:${p.nodeId}`).join('|');
+    if (state.gatewayKey !== gatewayKey) {
+      state.gatewayKey = gatewayKey; const old = $('gateway').value || state.settings.gateway || '';
+      $('gateway').replaceChildren(new Option('自动选择网关', ''));
+      for (const p of connectedPorts()) $('gateway').add(new Option(`${p.path}${p.nodeId ? ` · ${p.nodeId}` : ''}`, p.path));
+      if ([...$('gateway').options].some(o => o.value === old)) $('gateway').value = old;
+    }
+  }
+
+  async function togglePort(path) {
+    await run(async () => {
+      requireApi(); const port = state.snapshot.ports.find(p => p.path === path); if (!port) return;
+      state.busyPorts.add(path); state.dirty = true;
+      try {
+        if (port.connected) checkResult(await api.disconnect(path));
+        else checkResult(await api.connect({ path, baudRate: Number(port.baudRate || $('default-baud').value), encoding: port.encoding || 'auto' }));
+      } finally { state.busyPorts.delete(path); }
+    });
+  }
+
+  function renderNodes() {
+    const nodes = state.snapshot.nodes;
+    const key = nodes.map(n => `${nodeId(n)}:${n.port || ''}`).join('|');
+    if (key !== state.nodeKey) {
+      state.nodeKey = key; const children = [];
+      children.push(button('全部节点', 'node-tab', null, () => selectNode(null)));
+      for (const n of nodes) { const b = button(nodeId(n), 'node-tab', null, () => selectNode(nodeId(n))); b.dataset.node = nodeId(n); children.push(b); }
+      $('node-tabs').replaceChildren(...children); state.matrixKey = ''; state.detailKey = ''; state.historyOptionsKey = '';
+    }
+    $('node-tabs').querySelectorAll('button').forEach(b => b.classList.toggle('active', (b.dataset.node || null) === state.selected));
+    const table = $('distance-matrix'); const ids = nodes.map(nodeId);
+    const matrixKey = ids.join('|');
+    if (matrixKey !== state.matrixKey) {
+      state.matrixKey = matrixKey; state.matrixCells.clear(); const head = element('thead'); const headerRow = element('tr');
+      headerRow.append(element('th', '', '节点 / 目标'));
+      ids.forEach(id => { const th = element('th', '', id); th.scope = 'col'; headerRow.append(th); }); head.append(headerRow);
+      const body = element('tbody');
+      nodes.forEach(n => {
+        const id = nodeId(n); const row = element('tr'); const th = element('th'); th.scope = 'row';
+        const choose = button('', 'matrix-row-head', null, () => selectNode(id)); choose.replaceChildren();
+        const label = element('span', 'matrix-node-id'); const dot = element('span', 'status-dot'); dot.style.background = colorFor(id); dot.style.boxShadow = 'none'; label.append(dot, document.createTextNode(id));
+        const kind = element('span', 'matrix-node-kind', kindLabel(state.snapshot.ports.find(p => p.path === n.port)?.kind)); choose.append(label, kind); th.append(choose); row.append(th);
+        ids.forEach(peer => {
+          const td = element('td'); const value = element('div', 'cell-value', id === peer ? '0' : '—');
+          const unit = element('div', 'cell-unit', 'm'); td.append(value, unit); td.classList.toggle('diagonal', id === peer);
+          if (id !== peer) { td.tabIndex = 0; td.addEventListener('click', () => selectNode(id)); td.addEventListener('keydown', e => { if (e.key === 'Enter') selectNode(id); }); }
+          row.append(td); state.matrixCells.set(`${id}>${peer}`, { td, value, unit });
+        }); body.append(row);
+      }); table.replaceChildren(head, body);
+      table.style.minWidth = `${Math.max(440, ids.length * 108 + 145)}px`;
+    }
+    table.hidden = nodes.length === 0; $('matrix-empty').hidden = nodes.length > 0;
+    const edges = new Map(state.snapshot.edges.map(e => [`${idOf(e.source)}>${idOf(e.peer)}`, e]));
+    for (const [key, ui] of state.matrixCells) {
+      const [source, peer] = key.split('>'); const edge = edges.get(key); const diagonal = source === peer;
+      text(ui.value, diagonal ? '0' : measurement(edge));
+      ui.td.classList.toggle('selected', source === state.selected);
+      ui.td.classList.toggle('valid', !diagonal && finiteDistance(edge));
+      ui.td.classList.toggle('unknown', !diagonal && !finiteDistance(edge));
+      ui.td.title = diagonal ? '同一节点：0 m' : edge ? `${source} → ${peer}\n${finiteDistance(edge) ? `${Number(edge.distance).toFixed(3)} m` : '未知或已过期'} · ${ageLabel(Number(edge.ageMs))}\n${edge.method === 'compensatory' ? '补偿测距' : '常规测距'}` : `${source} → ${peer}：尚无独立测量`;
+    }
+    renderDetail();
+  }
+  function matrixAxes(port) {
+    const ids = new Map();
+    const add = n => { const id = typeof n === 'object' && n !== null ? nodeId(n) : idOf(n); if (id && !ids.has(id)) ids.set(id, typeof n === 'object' ? n : { id }); };
+    state.snapshot.nodes.forEach(add); (Array.isArray(port.matrixNodes) ? port.matrixNodes : []).forEach(add);
+    if (port.nodeId) add(port.nodeId);
+    for (const edge of Array.isArray(port.matrixEdges) ? port.matrixEdges : []) { add(edge.source); add(edge.peer); }
+    return [...ids.values()];
+  }
+  function portView(port) {
+    let view = state.portMatrixViews.get(port.path);
+    if (!view) { view = { paused: false, frozen: null }; state.portMatrixViews.set(port.path, view); }
+    return view;
+  }
+  function togglePortMatrix(path) {
+    const port = state.snapshot.ports.find(p => p.path === path); if (!port) return;
+    const view = portView(port); view.paused = !view.paused;
+    if (view.paused) view.frozen = { nodes: matrixAxes(port).map(n => ({ id: nodeId(n) })), updatedAt: port.matrixUpdatedAt, at: Number(state.snapshot.now) || Date.now(), edges: (port.matrixEdges || []).map(({ history, ...edge }) => ({ ...edge })) };
+    else view.frozen = null;
+    state.dirty = true;
+  }
+  function openPortTerminal(path) {
+    state.activePort = path; state.terminalKey = ''; state.dirty = true;
+    $('terminal-section').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  }
+  function openPortNode(path) {
+    const port = state.snapshot.ports.find(p => p.path === path); if (!port?.nodeId) return;
+    selectNode(idOf(port.nodeId)); $('aggregate-view').open = true;
+    $('aggregate-view').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  }
+  /** 每张矩阵只读该串口的matrixEdges；统一节点表仅用于坐标轴，禁止回退汇总边。 */
+  function renderPortMatrices() {
+    const ports = state.snapshot.ports; const key = ports.map(p => p.path).join('|'); const grid = $('port-matrix-grid');
+    if (key !== state.portMatrixKey) {
+      state.portMatrixKey = key; state.portMatrixElements.clear();
+      grid.replaceChildren(); grid.dataset.count = String(Math.min(3, Math.max(1, ports.length)));
+      if (!ports.length) { const empty = element('div', 'empty-state port-matrix-empty'); empty.append(icon('radio'), element('h3', '', '连接设备，同时查看各自的距离矩阵'), element('p', '', '每张卡只显示该串口收到的观测，未上报的方向保留为空。'), button('连接设备', 'button primary', 'plus', () => openPorts())); grid.append(empty); }
+      for (const port of ports) {
+        const card = element('article', 'port-matrix-card'); card.dataset.port = port.path;
+        const heading = element('div', 'port-matrix-heading'); const titles = element('div'); const name = element('h3', '', port.path); const identity = element('p', 'port-matrix-identity'); titles.append(name, identity);
+        const pause = button('暂停显示', 'button small port-matrix-pause', 'pause', () => togglePortMatrix(port.path)); pause.setAttribute('aria-label', `${port.path} 暂停或恢复矩阵显示`); heading.append(titles, pause);
+        const timing = element('div', 'port-matrix-timing'); const updated = element('span', 'port-matrix-updated'); const age = element('span', 'port-matrix-age'); timing.append(updated, age);
+        const scroll = element('div', 'port-matrix-scroll'); const table = element('table', 'distance-matrix port-distance-matrix'); table.setAttribute('aria-label', `${port.path} 独立距离矩阵`); scroll.append(table);
+        const note = element('p', 'port-matrix-note', '上报节点 ↓ / 对端节点 → · 单位 m · 未上报的方向为空');
+        const footer = element('div', 'port-matrix-footer'); const status = element('span', 'port-matrix-status');
+        const actions = element('div'); const node = button('节点控制', 'text-button', 'node', () => openPortNode(port.path)); const terminal = button('终端', 'text-button', 'terminal', () => openPortTerminal(port.path)); actions.append(node, terminal); footer.append(status, actions);
+        card.append(heading, timing, scroll, note, footer); grid.append(card);
+        state.portMatrixElements.set(port.path, { card, identity, pause, updated, age, table, status, node, axesKey: '', cells: new Map() });
+      }
+    }
+    const now = Number(state.snapshot.now) || Date.now();
+    for (const port of ports) {
+      const ui = state.portMatrixElements.get(port.path); if (!ui) continue;
+      const view = portView(port); const axes = view.paused ? view.frozen.nodes : matrixAxes(port); const axesKey = axes.map(nodeId).join('|');
+      const updatedAt = view.paused ? view.frozen.updatedAt : port.matrixUpdatedAt;
+      const rawEdges = view.paused ? view.frozen.edges : (Array.isArray(port.matrixEdges) ? port.matrixEdges : []);
+      const elapsed = view.paused ? Math.max(0, now - view.frozen.at) : 0;
+      const edges = new Map(rawEdges.map(e => {
+        const ageMs = (Number.isFinite(Number(e.ageMs)) ? Number(e.ageMs) : updatedAt ? Math.max(0, (view.paused ? view.frozen.at : now) - Number(updatedAt)) : Infinity) + elapsed;
+        return [`${idOf(e.source)}>${idOf(e.peer)}`, { ...e, ageMs, valid: e.valid === true && port.connected && ageMs < 3000 }];
+      }));
+      text(ui.identity, `${kindLabel(port.kind)} · RAC ${port.nodeId || '等待识别'}`);
+      text(ui.updated, updatedAt ? `更新 ${timeText(updatedAt)}` : '更新 —');
+      const ages = [...edges.values()].map(e => e.ageMs).filter(Number.isFinite); const minAge = ages.length ? Math.min(...ages) : null; const maxAge = ages.length ? Math.max(...ages) : null;
+      text(ui.age, minAge === null ? '测量年龄 —' : `测量年龄 ${Math.round(minAge)}${Math.round(maxAge) !== Math.round(minAge) ? `–${Math.round(maxAge)}` : ''} ms`);
+      ui.card.classList.toggle('is-paused', view.paused); ui.card.classList.toggle('is-disconnected', !port.connected);
+      const pauseLabel = view.paused ? '恢复显示' : '暂停显示'; if (ui.pause.dataset.paused !== String(view.paused)) { ui.pause.dataset.paused = String(view.paused); ui.pause.replaceChildren(icon(view.paused ? 'play' : 'pause'), element('span', '', pauseLabel)); }
+      text(ui.status, view.paused ? '显示已暂停 · 采集继续' : port.connected ? '● 独立接收中' : '○ 已断开 · 观测失效'); ui.node.disabled = !port.nodeId;
+      if (ui.axesKey !== axesKey || !ui.table.children.length) {
+        ui.axesKey = axesKey; ui.cells.clear(); const head = element('thead'); const header = element('tr'); header.append(element('th', '', '节点 / 对端'));
+        axes.forEach(n => { const cell = element('th', '', nodeId(n)); cell.scope = 'col'; header.append(cell); }); head.append(header); const body = element('tbody');
+        axes.forEach(n => {
+          const source = nodeId(n); const row = element('tr'); const label = element('th', '', source); label.scope = 'row'; label.classList.toggle('own-node', source === idOf(port.nodeId)); row.append(label);
+          axes.forEach(peerNode => { const peer = nodeId(peerNode); const cell = element('td'); cell.dataset.source = source; cell.dataset.peer = peer; const value = element('div', 'cell-value'); const unit = element('div', 'cell-unit'); cell.append(value, unit); row.append(cell); ui.cells.set(`${source}>${peer}`, { cell, value, unit }); }); body.append(row);
+        });
+        if (!axes.length) { const row = element('tr'); const cell = element('td', 'port-matrix-waiting', '等待该串口识别节点并接收测量'); row.append(cell); body.append(row); }
+        ui.table.replaceChildren(head, body); ui.table.style.minWidth = `${Math.max(320, axes.length * 78 + 100)}px`;
+      }
+      for (const [cellKey, cell] of ui.cells) {
+        const [source, peer] = cellKey.split('>'); const diagonal = source === peer; const edge = edges.get(cellKey); const valid = !diagonal && finiteDistance(edge);
+        text(cell.value, diagonal ? '0' : valid ? Number(edge.distance).toFixed(3) : '—');
+        text(cell.unit, diagonal ? 'm' : valid ? `m · ${Math.round(edge.ageMs)} ms` : 'm');
+        cell.cell.classList.toggle('diagonal', diagonal); cell.cell.classList.toggle('valid', valid); cell.cell.classList.toggle('unknown', !diagonal && !valid);
+        cell.cell.classList.toggle('selected', !diagonal && source === idOf(port.nodeId));
+        cell.cell.title = diagonal ? '同一节点：0 m' : edge ? `${port.path} 独立接收\n${source} → ${peer}：${valid ? `${Number(edge.distance).toFixed(3)} m` : '未知或已过期'}\n测量年龄 ${Math.round(edge.ageMs)} ms${edge.received ? `\n接收时间 ${timeText(edge.received)}` : ''}${view.paused ? '\n暂停显示，后台采集仍在继续' : ''}` : `${port.path} 未上报 ${source} → ${peer}，不使用其他串口填补`;
+      }
+    }
+  }
+  function selectNode(id) {
+    state.selected = id; state.detailKey = ''; state.historyOptionsKey = ''; state.dirty = true; state.chartDirty = true;
+    if (id !== null) { const n = currentNode(); if (n?.port) state.activePort = n.port; }
+  }
+  function renderDetail() {
+    const n = currentNode(); const host = $('node-detail');
+    if (!n) {
+      if (state.detailKey !== 'empty') { const empty = element('div', 'empty-state detail-empty'); empty.append(icon('node'), element('p', '', '选择节点，查看观测与控制。')); host.replaceChildren(empty); state.detailKey = 'empty'; }
+      return;
+    }
+    const id = nodeId(n); const port = state.snapshot.ports.find(p => p.path === n.port);
+    const edges = state.snapshot.edges.filter(e => idOf(e.source) === id && idOf(e.peer) !== id);
+    const detailKey = `${id}|${n.port}|${edges.map(e => idOf(e.peer)).join('|')}`;
+    if (state.detailKey !== detailKey) {
+      state.detailKey = detailKey; state.detailElements.clear(); host.replaceChildren();
+      const identity = element('div', 'node-identity'); const chip = element('div', 'device-chip'); const titles = element('div');
+      titles.append(element('h3', '', id), element('p', '', `${kindLabel(port?.kind)} · ${n.port || '无线节点'}`));
+      const status = element('span', 'node-active-label'); status.id = 'detail-active'; titles.append(status); identity.append(chip, titles); host.append(identity);
+      const observations = element('div', 'observation-list');
+      if (!edges.length) observations.append(element('p', 'muted', '等待该节点上报到其他节点的距离。'));
+      for (const edge of edges) {
+        const card = element('div', 'observation'); const title = element('div', 'observation-heading');
+        title.append(icon('arrow'), element('span', 'observation-peer', idOf(edge.peer))); const badge = element('span', 'method-badge'); title.append(badge);
+        const value = element('div', 'observation-value'); const number = element('span'); value.append(number, element('small', '', 'm'));
+        const age = element('div', 'observation-age'); card.append(title, value, age); observations.append(card);
+        state.detailElements.set(idOf(edge.peer), { number, badge, age });
+      }
+      host.append(observations); const note = element('p', 'detail-note'); note.append(icon('info'), document.createTextNode('本节点向其他节点的观测（有向测距）')); host.append(note);
+      const controls = element('div', 'node-controls'); const actions = element('div', 'node-buttons');
+      actions.append(button('开始', 'button small primary', 'play', () => sendNode('start')), button('停止', 'button small', 'stop', () => sendNode('stop')), button('状态', 'button small', null, () => sendNode('status'))); controls.append(actions);
+      const configuration = element('details', 'node-configuration'); const summary = element('summary', '', '节点配置'); configuration.append(summary);
+      const form = element('div', 'node-form'); const label = element('label', '', '广播周期（ms）');
+      const period = element('input'); period.id = 'node-period'; period.type = 'number'; period.min = '50'; period.max = '500'; period.step = '10'; period.value = String(n.periodMs ?? port?.periodMs ?? ''); period.placeholder = '未知'; label.append(period);
+      const apply = button('应用', 'button', null, () => applyNodePeriod()); apply.id = 'apply-node-period'; form.append(label, apply); configuration.append(form);
+      const streamLabel = element('label', 'node-stream'); const stream = element('input'); stream.type = 'checkbox'; stream.id = 'node-stream'; stream.checked = Boolean(n.stream ?? port?.stream); stream.addEventListener('change', () => sendNode(`stream ${stream.checked ? 'on' : 'off'}`)); const streamText = element('span', '', '实时输出测量结果'); streamText.id = 'node-stream-label'; streamLabel.append(stream, streamText); configuration.append(streamLabel);
+      const neighbors = button('查询邻居', 'text-button', null, () => sendNode('neighbors')); neighbors.style.marginTop = '6px'; configuration.append(neighbors);
+      const meta = element('div', 'node-meta'); meta.id = 'node-meta'; configuration.append(meta); controls.append(configuration); host.append(controls);
+    }
+    const status = $('detail-active'); text(status, n.active === true ? '● 测距运行中' : n.active === false ? '○ 已停止' : '○ 状态待确认'); status.classList.toggle('inactive', !n.active);
+    for (const edge of edges) {
+      const ui = state.detailElements.get(idOf(edge.peer)); if (!ui) continue;
+      text(ui.number, measurement(edge)); text(ui.badge, edge.method === 'compensatory' ? '补偿' : '常规'); ui.badge.classList.toggle('compensatory', edge.method === 'compensatory');
+      text(ui.age, `${finiteDistance(edge) ? '测量更新' : '观测过期'} ${ageLabel(Number(edge.ageMs))}`);
+    }
+    text($('apply-node-period'), n.active ? '停止并应用' : '应用');
+    const canControl = Boolean(port?.connected);
+    host.querySelectorAll('button,input').forEach(e => { e.disabled = !canControl; });
+    if ($('node-stream') !== document.activeElement) { const stream = n.stream ?? port?.stream; $('node-stream').checked = Boolean(stream); $('node-stream').indeterminate = stream === undefined || stream === null; text($('node-stream-label'), stream === undefined || stream === null ? '实时输出（状态未知）' : '实时输出测量结果'); }
+    const stats = n.stats || {}; const metaValues = [`会话 ${n.boot ?? '—'}`, `周期 ${n.periodMs ?? port?.periodMs ?? '—'} ms`, `常规 ${stats.regular ?? '—'}`, `补偿 ${stats.compensatory ?? '—'}`];
+    const meta = $('node-meta'); if (meta.dataset.key !== metaValues.join('|')) { meta.dataset.key = metaValues.join('|'); meta.replaceChildren(...metaValues.map(v => element('span', '', v))); }
+  }
+  function randomSession() { const data = new Uint32Array(1); crypto.getRandomValues(data); return data[0] || 1; }
+  async function sendNode(subcommand) {
+    await run(async () => {
+      const n = currentNode(); if (!n?.port) throw new Error('该节点没有可用的本机串口，请选择已连接节点或使用全网控制。');
+      const command = `swarm ${subcommand === 'start' ? `start ${randomSession()}` : subcommand}`;
+      await sendCommands([n.port], command, 'crlf');
+    });
+  }
+  async function applyNodePeriod() {
+    const input = $('node-period'); const value = Number(input?.value);
+    if (!Number.isInteger(value) || value < 50 || value > 500) { toast('广播周期应为 50–500 ms 的整数。', true); input?.focus(); return; }
+    await run(async () => {
+      const n = currentNode(); if (!n?.port) throw new Error('请先连接该节点的串口。');
+      if (n.active) await sendCommands([n.port], 'swarm stop', 'crlf');
+      await sendCommands([n.port], `swarm period ${value}`, 'crlf');
+      toast('已发送周期配置；运行中的节点已先发送停止指令。');
+    }, $('apply-node-period'));
+  }
+
+  function renderControl() {
+    const c = state.snapshot.control || {}; const key = JSON.stringify(c); if (key === state.controlKey) return; state.controlKey = key;
+    $('network-start').disabled = Boolean(c.pending); $('network-stop').disabled = Boolean(c.pending);
+    const feedback = $('control-feedback'); const results = Array.isArray(c.results) ? c.results : [];
+    if (!c.action && c.error) { feedback.hidden = false; feedback.classList.add('error'); text(feedback, `控制通道异常：${c.error}`); return; }
+    if (!c.action && !c.pending && !results.length && !c.error) { feedback.hidden = true; return; }
+    const target = c.action === 'start'; const confirmed = results.filter(r => r.active === target && ['ok', 'ack', 'confirmed'].includes(r.result)).length;
+    const total = (Array.isArray(c.expected) ? c.expected.length : Number(c.expected)) || Number(c.total) || Math.max(results.length, state.snapshot.nodes.length);
+    const unknown = Math.max(0, total - confirmed);
+    const messages = [`${c.action === 'start' ? '启动' : '停止'}${c.pending ? '指令已发送，等待设备确认' : '确认结果'}：已确认 ${confirmed}${total ? ` / ${total}` : ''}${unknown ? `，未确认 ${unknown}` : ''}${c.requestId ? ` · 请求 ${c.requestId}` : ''}`];
+    if (!c.pending && unknown) messages.push('未确认节点的状态仍未知；请检查设备和网关，不以指令发出代表执行成功。');
+    if (c.error) messages.push(String(c.error));
+    if (c.timedOut) messages.push('等待设备确认已超时。');
+    if ((c.scope || $('control-scope').value) === 'radio') messages.push('无线确认仅覆盖已观测节点；尚未发现的设备状态仍未知。');
+    if (results.length) messages.push(results.map(r => `${r.node ?? r.port ?? '节点'}：${typeof r.result === 'string' ? r.result : r.active === target ? '已确认' : '待确认'}`).join('  '));
+    feedback.hidden = false; feedback.classList.toggle('error', !c.pending && unknown > 0); text(feedback, messages.join('\n'));
+  }
+  async function networkControl(action) {
+    await run(async () => {
+      requireApi(); if (!connectedPorts().length) throw new Error('请先连接至少一个设备串口。');
+      const scope = $('control-scope').value; const gateway = $('gateway').value || null;
+      checkResult(await api.control({ action, gateway, scope }));
+    }, action === 'start' ? $('network-start') : $('network-stop'));
+  }
+
+  function relevantEdges() { return state.snapshot.edges.filter(e => state.selected === null || idOf(e.source) === state.selected); }
+  function renderHistoryOptions() {
+    text($('history-source'), state.selected ? `${state.selected} → 各节点` : '全部节点独立观测');
+    const edges = relevantEdges(); const key = `${state.selected}|${edges.map(e => `${e.source}>${e.peer}`).join('|')}`;
+    if (state.historyOptionsKey === key) return; state.historyOptionsKey = key;
+    const select = $('history-peer'); const old = select.value; select.replaceChildren(new Option('全部目标', ''));
+    for (const e of edges) select.add(new Option(state.selected ? String(e.peer) : `${e.source} → ${e.peer}`, `${e.source}>${e.peer}`));
+    if ([...select.options].some(o => o.value === old)) select.value = old;
+  }
+  function renderChart() {
+    const canvas = $('history-chart'); const ctx = canvas.getContext('2d'); if (!ctx) return;
+    const rect = canvas.getBoundingClientRect(); const ratio = Math.min(devicePixelRatio || 1, 2); const w = Math.max(200, rect.width), h = rect.height || 150;
+    if (canvas.width !== Math.round(w * ratio) || canvas.height !== Math.round(h * ratio)) { canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio); }
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, w, h);
+    const style = getComputedStyle(document.documentElement); const muted = style.getPropertyValue('--muted').trim(); const line = style.getPropertyValue('--line').trim();
+    const now = Number(state.snapshot.now) || Date.now(); const range = Number($('history-window').value); const start = now - range;
+    const filter = $('history-peer').value; const edges = relevantEdges().filter(e => !filter || `${e.source}>${e.peer}` === filter);
+    const series = edges.map((e, i) => ({ edge: e, color: COLORS[i % COLORS.length], points: (Array.isArray(e.history) ? e.history : []).slice(-1800).filter(p => Number(p.t) >= start && Number(p.t) <= now) }));
+    let max = 0, min = Infinity, pointCount = 0;
+    for (const s of series) for (const p of s.points) if (Number.isFinite(p.v) && p.v >= 0) { min = Math.min(min, p.v); max = Math.max(max, p.v); pointCount++; }
+    const floor = Number.isFinite(min) ? Math.max(0, min - Math.max(.05, (max - min) * .25)) : 0;
+    const ceil = Math.max(floor + .2, max + Math.max(.05, (max - min) * .25));
+    const left = 38, right = w - 10, top = 8, bottom = h - 24, width = right - left, height = bottom - top;
+    ctx.font = '10px "Segoe UI", sans-serif'; ctx.lineWidth = 1; ctx.strokeStyle = line; ctx.fillStyle = muted;
+    for (let i = 0; i < 3; i++) { const y = top + i * height / 2; ctx.beginPath(); ctx.moveTo(left, y + .5); ctx.lineTo(right, y + .5); ctx.stroke(); ctx.textAlign = 'right'; ctx.fillText((ceil - i * (ceil - floor) / 2).toFixed(ceil >= 10 ? 1 : 2), left - 8, y + 3); }
+    ctx.textAlign = 'center';
+    for (let i = 0; i < 5; i++) { ctx.textAlign = i === 0 ? 'left' : i === 4 ? 'right' : 'center'; ctx.fillText(new Date(start + i * range / 4).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', ...(range <= 60000 ? { second: '2-digit' } : {}) }), left + i * width / 4, h - 6); }
+    for (const s of series) {
+      const stride = Math.max(1, Math.ceil(s.points.length / 600)); const period = state.snapshot.nodes.find(n => nodeId(n) === idOf(s.edge.source))?.periodMs || 200;
+      const maxGap = Math.max(1000, Number(period) * 4); let previous = null, lastRawTime = null, broken = true; ctx.beginPath(); ctx.strokeStyle = s.color; ctx.lineWidth = 1.7;
+      for (let i = 0; i < s.points.length; i++) {
+        const p = s.points[i];
+        if (!Number.isFinite(p.v) || p.v < 0) { previous = null; lastRawTime = null; broken = true; continue; }
+        if (lastRawTime !== null && Number(p.t) - lastRawTime > maxGap) broken = true;
+        lastRawTime = Number(p.t);
+        if (i % stride !== 0 && i !== s.points.length - 1) continue;
+        const x = left + (Number(p.t) - start) / range * width; const y = bottom - (p.v - floor) / (ceil - floor) * height;
+        if (previous && !broken) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        previous = p; broken = false;
+      } ctx.stroke();
+    }
+    $('chart-empty').hidden = pointCount > 0;
+    const legendKey = series.map(s => `${s.edge.source}>${s.edge.peer}:${measurement(s.edge)}`).join('|');
+    if ($('chart-legend').dataset.key !== legendKey) {
+      $('chart-legend').dataset.key = legendKey;
+      $('chart-legend').replaceChildren(...series.map(s => { const item = element('span', 'legend-item'); const dot = element('i', 'legend-dot'); dot.style.background = s.color; item.append(dot, document.createTextNode(`${state.selected ? '' : `${s.edge.source} → `}${s.edge.peer}  ${measurement(s.edge)} m`)); return item; }));
+    }
+  }
+
+  function visibleTerminalLines() {
+    const p = currentPort(); if (!p) return [];
+    const local = terminalState(p.path); const source = local.paused ? local.frozen : (p.lines || []).slice(-500);
+    const filter = $('terminal-filter').value.trim().toLowerCase(); const direction = $('terminal-direction').value;
+    return source.filter(line => !local.cleared.has(String(line.id)) && (direction === 'all' || line.direction === direction) && (!filter || String(line.text || '').toLowerCase().includes(filter))).slice(-500);
+  }
+  function renderTerminal() {
+    const ports = state.snapshot.ports; const tabsKey = `${ports.map(p => `${p.path}:${p.connected}`).join('|')}@${state.activePort}`;
+    if (state.terminalTabsKey !== tabsKey) {
+      state.terminalTabsKey = tabsKey;
+      $('terminal-tabs').replaceChildren(...ports.map(p => { const b = button(p.path, `terminal-tab${p.path === state.activePort ? ' active' : ''}`, null, () => { state.activePort = p.path; state.terminalKey = ''; state.dirty = true; }); b.title = p.connected ? '已连接' : '已断开，保留记录'; return b; }));
+    }
+    const p = currentPort(); const local = p ? terminalState(p.path) : null;
+    const lines = visibleTerminalLines(); const key = `${state.activePort}|${local?.paused}|${$('terminal-filter').value}|${$('terminal-direction').value}|${lines.map(l => l.id).join(',')}`;
+    const host = $('terminal-lines');
+    if (state.terminalKey !== key) {
+      state.terminalKey = key; const atBottom = host.scrollHeight - host.scrollTop - host.clientHeight < 40;
+      if (!lines.length) host.replaceChildren(element('div', 'terminal-empty', p ? $('terminal-filter').value ? '没有符合过滤条件的记录。' : local.paused ? '显示已暂停，后台采集仍在继续。' : '等待设备输出。' : '连接串口后，在这里查看设备的原始输出。'));
+      else {
+        if (host.dataset.port !== String(state.activePort) || host.querySelector('.terminal-empty')) { host.replaceChildren(); host.dataset.port = String(state.activePort); }
+        const wanted = new Set(lines.map(l => String(l.id))); const existing = new Map();
+        for (const row of [...host.children]) { if (!wanted.has(row.dataset.lineId)) row.remove(); else existing.set(row.dataset.lineId, row); }
+        let cursor = host.firstElementChild;
+        for (const line of lines) {
+          let row = existing.get(String(line.id));
+          if (!row) { row = element('div', `terminal-line ${['rx', 'tx', 'system'].includes(line.direction) ? line.direction : 'system'}`); row.dataset.lineId = String(line.id); row.append(element('span', 'line-time', timeText(line.time)), element('span', 'line-direction', line.direction === 'tx' ? 'TX' : line.direction === 'rx' ? 'RX' : '·'), element('span', 'line-text', line.text || '')); }
+          if (row === cursor) cursor = cursor.nextElementSibling; else host.insertBefore(row, cursor);
+        }
+        if (atBottom && !local?.paused) host.scrollTop = host.scrollHeight;
+      }
+    }
+    text($('terminal-count'), `${lines.length} 条可见记录`);
+    const pause = $('pause-terminal'); pause.replaceChildren(icon(local?.paused ? 'play' : 'pause'), element('span', '', local?.paused ? '继续显示' : '暂停显示')); pause.disabled = !p;
+    text($('terminal-pause-status'), local?.paused ? '已暂停显示 · 后台采集继续' : '显示最新 500 条 · 原始采集独立运行');
+    text($('terminal-port-status'), p ? `${p.path} · ${p.baudRate || 115200} · ${p.encoding || 'auto'}${p.connected ? '' : ' · 已断开'}` : '尚未选择串口');
+    $('command-input').disabled = connectedPorts().length === 0; $('command-form').querySelector('button').disabled = connectedPorts().length === 0;
+    renderQuickCommands();
+  }
+  function renderQuickCommands() {
+    const quick = state.settings.quickCommands || []; const key = JSON.stringify(quick); if (state.quickKey === key) return; state.quickKey = key;
+    const children = quick.map(q => {
+      const b = button(q.label || q.command, 'quick-command', null, () => {
+        const parameter = /<[^>]+>/.exec(q.command);
+        if (parameter) {
+          const input = $('command-input'); input.value = q.command; input.focus();
+          input.setSelectionRange(parameter.index, parameter.index + parameter[0].length);
+          toast('请填写选中的参数，再发送指令。');
+        } else run(() => sendCurrent(q.command));
+      });
+      b.title = q.command; return b;
+    });
+    children.push(button('编辑快捷指令', 'quick-command quick-edit', 'settings', () => openSettings())); $('quick-commands').replaceChildren(...children);
+  }
+  async function sendCommands(paths, command, lineEnding) {
+    requireApi(); if (!paths.length) throw new Error('请先选择已连接的设备串口。');
+    if (/<[^>]+>/.test(command)) throw new Error('请先填写指令中的参数。');
+    if (new TextEncoder().encode(command).length > 256 || /[\r\n\0]/.test(command)) throw new Error('单条指令不能超过 256 字节，也不能包含换行或空字符。');
+    const response = checkResult(await api.send({ paths, command, lineEnding }));
+    const results = Array.isArray(response) ? response : response?.results;
+    const failures = Array.isArray(results) ? results.filter(r => r.ok === false || r.success === false || r.error) : [];
+    if (failures.length) throw new Error(failures.map(r => `${r.path || '串口'}：${r.error || r.message || '发送失败'}`).join('\n'));
+    return response;
+  }
+  async function sendCurrent(command) {
+    const value = String(command || ''); if (!value.trim()) return;
+    const ports = $('send-all').checked ? connectedPorts().map(p => p.path) : currentPort()?.connected ? [state.activePort] : [];
+    await sendCommands(ports, value, $('line-ending').value);
+    for (const historyKey of ports) {
+      const history = state.commandHistory.get(historyKey) || [];
+      if (history[history.length - 1] !== value) history.push(value);
+      state.commandHistory.set(historyKey, history.slice(-50)); terminalState(historyKey).historyIndex = -1;
+    }
+  }
+
+  async function scanPorts(open = false) {
+    requireApi(); const data = await api.listPorts(); state.discovered = Array.isArray(data) ? data : data?.ports || [];
+    state.selectedPorts = new Set(state.discovered.filter(p => p.suggested && p.kind !== 'probe' && !state.snapshot.ports.some(s => s.path === p.path && s.connected)).map(p => p.path));
+    renderAvailablePorts(); if (open && !$('ports-dialog').open) $('ports-dialog').showModal(); return state.discovered;
+  }
+  function renderAvailablePorts() {
+    const host = $('available-ports'); host.replaceChildren();
+    if (!state.discovered.length) host.append(element('div', 'empty-state', '未发现串口。连接设备后重新扫描。'));
+    for (const p of state.discovered) {
+      const connected = state.snapshot.ports.some(s => s.path === p.path && s.connected);
+      const label = element('label', 'available-port'); const check = element('input'); check.type = 'checkbox'; check.checked = state.selectedPorts.has(p.path); check.disabled = connected;
+      check.addEventListener('change', () => { if (check.checked) state.selectedPorts.add(p.path); else state.selectedPorts.delete(p.path); });
+      const body = element('div', 'available-port-body'); body.append(element('strong', '', p.path), element('p', '', [p.manufacturer, p.serialNumber].filter(Boolean).join(' · ') || '未提供设备描述'));
+      const badge = element('span', `port-kind-badge${p.kind === 'probe' ? ' probe' : ''}`, connected ? '已连接' : kindLabel(p.kind)); label.append(check, body, badge); host.append(label);
+    }
+    text($('scan-summary'), `发现 ${state.discovered.length} 个串口`);
+  }
+  async function openPorts() {
+    $('dialog-baud').value = $('default-baud').value;
+    if (!$('ports-dialog').open) $('ports-dialog').showModal();
+    await run(() => scanPorts(false));
+  }
+  async function connectSelected(paths, baudRate, encoding) {
+    requireApi(); const errors = []; let success = 0;
+    for (const path of paths) {
+      if (state.snapshot.ports.some(p => p.path === path && p.connected)) continue;
+      state.busyPorts.add(path);
+      try { checkResult(await api.connect({ path, baudRate, encoding })); success++; state.activePort = path; }
+      catch (error) { errors.push(`${path}：${errorText(error)}`); }
+      finally { state.busyPorts.delete(path); }
+    }
+    if (errors.length) toast(`${success} 个串口已连接\n${errors.join('\n')}`, true);
+    else if (success) { toast(`已连接 ${success} 个串口，等待设备识别。`); $('ports-dialog').close(); }
+    state.dirty = true;
+  }
+  function openSettings() {
+    state.modalTheme = state.settings.theme || 'system'; applyTheme(state.modalTheme); $('quick-command-editor').replaceChildren();
+    for (const q of state.settings.quickCommands || []) addQuickRow(q);
+    text($('settings-feedback'), ''); if (!$('settings-dialog').open) $('settings-dialog').showModal();
+  }
+  function addQuickRow(q = { label: '', command: '' }) {
+    const row = element('div', 'quick-editor-row'); const label = element('input'); label.placeholder = '按钮名称'; label.value = q.label || ''; label.maxLength = 30; label.setAttribute('aria-label', '快捷指令名称');
+    const command = element('input'); command.placeholder = '完整指令（最多256字节）'; command.value = q.command || ''; command.maxLength = 256; command.setAttribute('aria-label', '快捷指令内容');
+    const remove = button('', 'button icon-button', 'trash', () => row.remove()); remove.title = '删除快捷指令'; remove.setAttribute('aria-label', '删除快捷指令'); row.append(label, command, remove); $('quick-command-editor').append(row);
+  }
+  async function saveSettings() {
+    await run(async () => {
+      const quickCommands = [...$('quick-command-editor').children].map(row => ({ label: row.children[0].value.trim(), command: row.children[1].value })).filter(q => q.command.trim());
+      if (quickCommands.length > 30) throw new Error('最多保存 30 个快捷指令。');
+      if (quickCommands.some(q => new TextEncoder().encode(q.command).length > 256 || /[\r\n\0]/.test(q.command))) throw new Error('每条快捷指令不能超过 256 字节，也不能包含换行或空字符。');
+      for (const q of quickCommands) if (!q.label) q.label = q.command.slice(0, 22);
+      const patch = { theme: state.modalTheme || state.settings.theme, quickCommands };
+      if (api) checkResult(await api.setSettings(patch)); state.settings = { ...state.settings, ...patch }; applyTheme(state.settings.theme); state.quickKey = ''; state.dirty = true;
+      $('settings-dialog').close(); toast('设置已保存。');
+    }, $('save-settings'));
+  }
+  async function exportData(type, port) {
+    await run(async () => {
+      requireApi();
+      const selected = port || state.activePort || connectedPorts()[0]?.path;
+      if (type !== 'csv' && !selected) throw new Error('请先选择有记录的串口。');
+      const result = checkResult(await api.export({type, ...(type !== 'csv' ? {path:selected} : {})}));
+      if (result?.filePath) toast(`已导出到 ${result.filePath}`);
+    });
+  }
+
+  function render() {
+    ensurePortSelection(); renderPorts(); renderPortMatrices(); renderNodes(); renderControl(); renderHistoryOptions(); renderTerminal(); window.UwbDropdowns?.refreshAll();
+    const directory = state.snapshot.recording?.directory;
+    const recording = state.snapshot.recording || {}; const recordLabel = [directory || '原始记录由桌面应用保存', recording.error ? `记录异常：${recording.error}` : '', recording.csvDropped ? `CSV 丢弃 ${recording.csvDropped} 条` : ''].filter(Boolean).join(' · ');
+    text($('recording-directory'), recordLabel); $('recording-directory').title = recordLabel;
+    text($('settings-recording-directory'), directory || '连接后由桌面应用持续保存。');
+  }
+  /** 串口只在主进程采集；此处合并10Hz增量并严格保留每口最新500条。 */
+  function acceptSnapshot(snapshot) {
+    const ports = Array.isArray(snapshot.ports) ? snapshot.ports : [];
+    const livePaths = new Set(ports.map(p => p.path));
+    for (const path of state.lineCache.keys()) if (!livePaths.has(path)) state.lineCache.delete(path);
+    const mergedPorts = ports.map(p => {
+      const incoming = Array.isArray(p.lines) ? p.lines : [];
+      let lines;
+      if (snapshot.terminalDelta) {
+        const old = state.lineCache.get(p.path) || []; const ids = new Set(old.map(l => String(l.id)));
+        lines = old.concat(incoming.filter(l => !ids.has(String(l.id)))).slice(-500);
+      } else lines = incoming.slice(-500);
+      state.lineCache.set(p.path, lines); return { ...p, lines };
+    });
+    nextSnapshot = { ...snapshot, ports: mergedPorts };
+  }
+  function frameLoop(t) {
+    if (t - state.lastRender >= 100 && (state.dirty || nextSnapshot)) {
+      if (nextSnapshot) { state.snapshot = { ports: [], nodes: [], edges: [], control: {}, recording: {}, ...nextSnapshot }; nextSnapshot = null; state.chartDirty = true; }
+      state.lastRender = t; state.dirty = false; render();
+      if (state.chartDirty) { renderChart(); state.chartDirty = false; }
+    }
+    requestAnimationFrame(frameLoop);
+  }
+
+  $('scan-ports').addEventListener('click', () => openPorts()); $('empty-connect').addEventListener('click', () => openPorts());
+  $('port-matrix-connect').addEventListener('click', () => openPorts());
+  $('add-port').addEventListener('click', () => openPorts());
+  $('dialog-scan').addEventListener('click', e => run(() => scanPorts(false), e.currentTarget));
+  $('connect-selected').addEventListener('click', e => run(() => {
+    if (!state.selectedPorts.size) throw new Error('请选择至少一个未连接串口。');
+    return connectSelected([...state.selectedPorts], Number($('dialog-baud').value), $('dialog-encoding').value);
+  }, e.currentTarget));
+  $('connect-suggested').addEventListener('click', e => run(async () => {
+    await scanPorts(false); const paths = [...state.selectedPorts];
+    if (!paths.length) { $('ports-dialog').showModal(); toast('没有可自动连接的设备，请手动选择串口。'); return; }
+    await connectSelected(paths, Number($('default-baud').value), 'auto');
+  }, e.currentTarget));
+  $('network-start').addEventListener('click', () => networkControl('start')); $('network-stop').addEventListener('click', () => networkControl('stop'));
+  $('control-scope').addEventListener('change', e => run(async () => { state.settings.scope = e.target.value; if (api) await api.setSettings({ scope: e.target.value }); }));
+  $('gateway').addEventListener('change', e => run(async () => { state.settings.gateway = e.target.value || null; if (api) await api.setSettings({ gateway: state.settings.gateway }); }));
+  $('history-window').addEventListener('change', () => { state.chartDirty = true; state.dirty = true; }); $('history-peer').addEventListener('change', () => { state.chartDirty = true; state.dirty = true; });
+  $('terminal-filter').addEventListener('input', () => { state.dirty = true; }); $('terminal-direction').addEventListener('change', () => { state.dirty = true; });
+  $('pause-terminal').addEventListener('click', () => { const p = currentPort(); if (!p) return; const local = terminalState(p.path); local.paused = !local.paused; if (local.paused) local.frozen = (p.lines || []).slice(-500); else local.frozen = []; state.dirty = true; });
+  $('clear-terminal').addEventListener('click', () => { const p = currentPort(); if (!p) return; const local = terminalState(p.path); local.cleared = new Set([...(p.lines || []), ...local.frozen].slice(-1000).map(l => String(l.id))); state.terminalKey = ''; state.dirty = true; });
+  $('copy-terminal').addEventListener('click', e => run(async () => { const lines = visibleTerminalLines().map(l => `${timeText(l.time)} ${String(l.direction || '').toUpperCase()} ${l.text || ''}`); await copyText(lines.join('\n')); toast(`已复制 ${lines.length} 条记录。`); }, e.currentTarget));
+  $('command-form').addEventListener('submit', e => { e.preventDefault(); const value = $('command-input').value; run(async () => { await sendCurrent(value); $('command-input').value = ''; }); });
+  $('command-input').addEventListener('keydown', e => {
+    if ((e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !state.activePort) return;
+    const history = state.commandHistory.get(state.activePort) || []; if (!history.length) return;
+    const local = terminalState(state.activePort); e.preventDefault();
+    if (local.historyIndex === -1) local.draft = e.target.value;
+    if (e.key === 'ArrowUp') local.historyIndex = local.historyIndex < 0 ? history.length - 1 : Math.max(0, local.historyIndex - 1);
+    else local.historyIndex = local.historyIndex < 0 || local.historyIndex === history.length - 1 ? -1 : local.historyIndex + 1;
+    e.target.value = local.historyIndex < 0 ? local.draft : history[local.historyIndex];
+  });
+  $('open-settings').addEventListener('click', openSettings); $('add-quick-command').addEventListener('click', () => addQuickRow()); $('save-settings').addEventListener('click', saveSettings);
+  document.querySelectorAll('.modal-close').forEach(b => b.addEventListener('click', () => b.closest('dialog').close()));
+  document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener('click', () => { state.modalTheme = b.dataset.themeChoice; applyTheme(state.modalTheme); }));
+  $('settings-dialog').addEventListener('close', () => applyTheme(state.settings.theme || 'system'));
+  $('theme-toggle').addEventListener('click', () => run(() => saveTheme(({ system: 'light', light: 'dark', dark: 'system' })[state.settings.theme || 'system'])));
+  $('theme-select').addEventListener('change', event => run(() => saveTheme(event.target.value)));
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (state.settings.theme === 'system') applyTheme('system'); });
+  $('export-csv').addEventListener('click', () => exportData('csv')); $('export-raw').addEventListener('click', () => exportData('raw')); $('export-terminal').addEventListener('click', () => exportData('terminal', state.activePort));
+  document.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-nav]').forEach(n => { n.classList.toggle('active', n === b); if (n === b) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
+    if (b.dataset.nav === 'nodes') { $('aggregate-view').open = true; if (state.selected === null && state.snapshot.nodes.length) selectNode(nodeId(state.snapshot.nodes[0])); $('aggregate-view').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }); }
+    else if (b.dataset.nav === 'terminal') $('terminal-section').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    else window.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  }));
+  window.addEventListener('resize', () => { state.chartDirty = true; state.dirty = true; });
+  if (typeof ResizeObserver !== 'undefined') { resizeObserver = new ResizeObserver(() => { state.chartDirty = true; state.dirty = true; }); resizeObserver.observe($('history-chart')); }
+  if (api) {
+    api.onSnapshot(snapshot => { if (snapshot && typeof snapshot === 'object') acceptSnapshot(snapshot); });
+    run(async () => { const settings = await api.getSettings(); state.settings = { ...state.settings, ...settings }; applyTheme(state.settings.theme || 'system'); $('control-scope').value = state.settings.scope || 'radio'; state.quickKey = ''; state.dirty = true; });
+  } else { $('preview-banner').hidden = false; applyTheme('system'); }
+  requestAnimationFrame(frameLoop);
+})();
