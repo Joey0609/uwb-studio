@@ -7,11 +7,11 @@ const {createAcquisitionLog} = require('./acquisition-log.cjs');
 if(process.env.UWB_USER_DATA_DIR){fs.mkdirSync(process.env.UWB_USER_DATA_DIR,{recursive:true});app.setPath('userData',process.env.UWB_USER_DATA_DIR);}
 let window, worker, settingsPath, settings, closing=false, rpcId=1, recordingWarning='';
 const calls=new Map();
-const defaults={theme:'system',scope:'radio',gateway:null,quickVersion:3,quickCommands:[
+const defaults={theme:'system',scope:'radio',gateway:null,quickVersion:4,quickCommands:[
   {label:'节点信息',command:'swarm info'},{label:'矩阵快照',command:'swarm snapshot'},{label:'节点状态',command:'swarm status'},{label:'邻居观测',command:'swarm neighbors'},
   {label:'本机地址',command:'racaddr'},
   {label:'开启数据',command:'swarm stream on'},{label:'关闭数据',command:'swarm stream off'},
-  {label:'停止本机测距',command:'swarm stop'},
+  {label:'广播测距启动',command:'swarm broadcast start'},{label:'纯监听启动',command:'swarm monitor start'},{label:'停止本机测距',command:'swarm stop'},
   {label:'邻居发现（旧模式）',command:'neighbordiscover'},
   {label:'邻居列表（旧模式）',command:'neighborlist'},
   {label:'UWB芯片（旧模式）',command:'readreg 0'},
@@ -45,9 +45,14 @@ else{
   app.whenReady().then(()=>{
     settingsPath=path.join(app.getPath('userData'),'settings.json');
     try{settings={...defaults,...JSON.parse(fs.readFileSync(settingsPath,'utf8'))};}catch{settings={...defaults};}
-    if(settings.quickVersion!==3&&Array.isArray(settings.quickCommands)){for(const q of [{label:'节点信息',command:'swarm info'},{label:'矩阵快照',command:'swarm snapshot'}])if(!settings.quickCommands.some(old=>old.command===q.command))settings.quickCommands.unshift(q);settings.quickVersion=3;}
-    const legacyQuick=['swarm status','swarm neighbors','swarm stream on','swarm stream off','readreg 0','help'];
-    if(Array.isArray(settings.quickCommands)&&settings.quickCommands.length===legacyQuick.length&&settings.quickCommands.every((q,i)=>q.command===legacyQuick[i]))settings.quickCommands=defaults.quickCommands.map(q=>({...q}));
+    // 只升级完整匹配旧默认的列表；用户增删改过的快捷指令不追加、不覆盖。
+    const priorDefault=[
+      ['节点信息','swarm info'],['矩阵快照','swarm snapshot'],['节点状态','swarm status'],['邻居观测','swarm neighbors'],['本机地址','racaddr'],
+      ['开启数据','swarm stream on'],['关闭数据','swarm stream off'],['停止本机测距','swarm stop'],['邻居发现（旧模式）','neighbordiscover'],
+      ['邻居列表（旧模式）','neighborlist'],['UWB芯片（旧模式）','readreg 0'],['单次测距…','range <目标地址>'],['广播消息…','broadcastsend <消息内容>'],['全部命令','help']
+    ];
+    if(Array.isArray(settings.quickCommands)&&priorDefault.length===settings.quickCommands.length&&priorDefault.every(([label,command],i)=>settings.quickCommands[i].label===label&&settings.quickCommands[i].command===command))settings.quickCommands=defaults.quickCommands.map(q=>({...q}));
+    settings.quickVersion=4;
     const stamp=new Date().toISOString().replace(/[:.]/g,'-');
     const directory=process.env.UWB_RECORDINGS_DIR||path.join(app.getPath('documents'),'UWB Studio','recordings',stamp);
     // 主进程先完成建目录，不能依赖子进程异步启动时抢先创建。
@@ -78,9 +83,14 @@ else{
       title:'UWB Studio',backgroundColor:'#f5f5f0',show:false,autoHideMenuBar:true,
       webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
     const page=pathToFileURL(path.join(__dirname,'../renderer/index.html')).href;
-    for(const name of ['listPorts','connect','disconnect','send','control','getSnapshot']){
+    for(const name of ['listPorts','connect','disconnect','removePort','send','control','setMode','nodeControl','getSnapshot']){
       ipcMain.handle('uwb:'+name,(event,args)=>{
         if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效操作来源');
+        if(['setMode','nodeControl'].includes(name)){
+          if(!args||typeof args!=='object'||Array.isArray(args)||typeof args.path!=='string'||!args.path||args.path.length>256)throw Error('节点操作参数无效');
+          if(name==='setMode'&&!['broadcast','monitor'].includes(args.mode)||name==='nodeControl'&&!['start','stop'].includes(args.action))throw Error('节点模式或操作无效');
+          const safe=name==='setMode'?{path:args.path,mode:args.mode}:{path:args.path,action:args.action};return call(name,safe);
+        }
         return call(name,args);
       });
     }

@@ -8,9 +8,10 @@ const crypto = require('node:crypto');
 const {SerialPort} = require('serialport');
 const {Model, fields} = require('./model.cjs');
 const {TelemetryFramer}=require('./telemetry.cjs');
+const commandPolicy=require('../renderer/command-policy.js');
 const model = new Model();
 const ports = new Map();
-let available = [], nextId = 1, control = {pending:false, results:[], expected:[]};
+let available = [], nextId = 1, operationId=1, control = {pending:false, results:[], expected:[]};
 const directory = process.argv[2];
 fs.mkdirSync(directory, {recursive:true});
 const csvPath = path.join(directory, 'observations.csv');
@@ -38,6 +39,7 @@ function snapshot(drain = true) {
     control.pending = false;
     control.timedOut = control.expected.some(id => !control.results.some(r => r.node === id && r.result === 'ok' && r.active === (control.action === 'start')));
   }
+  for(const p of ports.values())if(p.operation?.pending&&now>p.operation.deadline)finishOperation(p,false,'等待设备模式确认超时'+(p.operation.failureCandidate?'（'+p.operation.failureCandidate+'）':''));
   const state=model.snapshot(now);
   state.edges=[...ports.values()].flatMap(p=>p.model.snapshot(now).edges.map(edge=>{
     const key=`${edge.source}/${edge.peer}`;p.historySent??=new Map();const last=p.historySent.get(key)||0;
@@ -52,7 +54,7 @@ function snapshot(drain = true) {
     const lines = drain ? p.delta.splice(0) : p.lines.slice(-200);
     const local=p.model.snapshot(now,false);
     return {path:p.path,connected:p.connected,kind:p.kind,baudRate:p.baudRate,encoding:p.encoding,
-      nodeId:p.nodeId,active:n?.active,periodMs:n?.periodMs,stream:n?.stream,
+      nodeId:p.nodeId,active:n?.active,mode:n?.mode||'unknown',monitorCapable:n?.monitorCapable===true,passiveCapable:n?.passiveCapable===true,passiveGraph:n?.passiveGraph===true,passiveMaxNodes:n?.passiveMaxNodes||null,passiveReady:n?.passiveReady??null,passiveResultTtlMs:n?.passiveResultTtlMs||null,passive:n?.passive?{...n.passive}:null,targetMode:p.targetMode||'broadcast',operation:p.operation?{...p.operation}:null,periodMs:n?.periodMs,stream:n?.stream,
       rxBytes:p.rxBytes,txBytes:p.txBytes,dropped:p.rawDropped,droppedUi:p.droppedUi,
       lines,error:p.error,recording:p.rawPath,
       matrixNodes:local.nodes,matrixEdges:local.edges.map(({history,...edge})=>edge),matrixUpdatedAt:p.matrixUpdatedAt||null,telemetry:p.telemetry||'detecting',protocolErrors:p.protocolErrors||0};
@@ -72,6 +74,13 @@ function recover(port,reason) {
   line(port,reason+'，重新获取编号表与快照','system');
   if(port.connected)write(port,'swarm snapshot').catch(()=>{});
 }
+/** 仅连接或命令回执后查询一次；不创建周期状态轮询。 */
+function queryPassive(port){
+  if(!port.connected||port.model.nodes.get(port.nodeId)?.monitorCapable!==true||port.model.nodes.get(port.nodeId)?.passiveCapable!==true)return;
+  clearTimeout(port.passiveQueryTimer);port.passiveQueryTimer=setTimeout(()=>{
+    if(port.connected)write(port,'swarm monitor status').catch(()=>{});
+  },250);
+}
 function receiveLine(port,bytes) {
   const text=port.decoder.decode(bytes).replace(/\r$/,'');if(!text)return;line(port,text);
   const isMeasurement=/^@(SRV2 |SWARM_RANGE )/.test(text);
@@ -81,6 +90,8 @@ function receiveLine(port,bytes) {
   // 各端口模型独立维护元数据；汇总时附加 observer，不互相覆盖。
   if(result?.type==='info'){
     port.nodeId=result.node.id;
+    if(result.node.monitorCapable!==true&&port.targetMode==='monitor')port.targetMode='broadcast';
+    confirmOperation(port,result);queryPassive(port);
     if(result.fields.telemetry==='1'&&!port.negotiated){
       port.negotiated=true;port.telemetry='negotiating';clearTimeout(port.probeTimer);write(port,'swarm format binary').catch(()=>{});
     }
@@ -89,13 +100,9 @@ function receiveLine(port,bytes) {
     // format binary 已由固件依序发送 RESET/MAP/SNAPSHOT，不重复请求造成队列冲突。
   }else if(fields(text,'@SWARM_FORMAT')?.mode==='text'){port.telemetry='text';
   }else if(result?.type==='status'){
-    port.nodeId=result.node.id;
-    if(control.pending&&control.scope==='connected'&&control.paths.includes(port.path)){
-      const f=result.fields,right=result.node.active===(control.action==='start');
-      const explicit=control.action==='start'?['started','already_running'].includes(f.result)||f.action==='start':f.result==='stopped'||f.action==='stop';
-      if(explicit)noteResult({node:result.node.id,active:result.node.active,result:right&&!result.node.fault?'ok':'fault',via:'usb'});
-    }
-  }else if(result?.type==='ack'&&control.pending&&control.scope==='radio'&&result.ack.request===control.requestId&&result.ack.controller===control.controller)noteResult({...result.ack,via:'radio'});
+    port.nodeId=result.node.id;if(result.node.monitorCapable!==true&&port.targetMode==='monitor')port.targetMode='broadcast';
+    confirmOperation(port,result);queryPassive(port);
+  }else if(result?.type==='ack'&&control.pending&&control.scope==='radio'&&result.ack.request===control.requestId&&result.ack.controller===control.controller&&!control.excludedMonitors?.includes(result.ack.node))noteResult({...result.ack,via:'radio'});
   else if(result?.type==='control'&&control.pending&&Number(result.fields.request)===control.requestId&&result.fields.stage==='failed'){control.error=result.fields.reason||'设备拒绝或发射失败';control.pending=false;}
 }
 function receive(port,chunk) {
@@ -119,8 +126,8 @@ async function connect({path:portPath,baudRate=115200,encoding='auto'}) {
   const actual=encoding==='auto' ? (info.kind==='stm'?'gbk':'utf8') : encoding;
   const p=existing || {path:portPath,lines:[],delta:[],rxBytes:0,txBytes:0,rawDropped:0,droppedUi:0,model:new Model()};
   if(ports.size>=32&&!existing)throw Error('最多同时管理32个串口');
-  p.model.reset();
-  Object.assign(p,{nodeId:null,negotiated:false,telemetry:'detecting',kind:info.kind || 'unknown',baudRate,encoding,connected:false,error:'',wantReconnect:true,partial:Buffer.alloc(0),decoder:new TextDecoder(actual==='gbk'?'gb18030':'utf-8')});
+  p.model.reset();const previousIdentity=p.model.nodes.get(p.model.self);if(previousIdentity){previousIdentity.monitorCapable=false;previousIdentity.passiveCapable=false;previousIdentity.passiveGraph=false;previousIdentity.passiveMaxNodes=null;previousIdentity.passiveReady=null;previousIdentity.passive=null;previousIdentity.mode='unknown';previousIdentity.active=null;}
+  Object.assign(p,{nodeId:null,operation:null,targetMode:p.targetMode||'broadcast',negotiated:false,telemetry:'detecting',kind:info.kind || 'unknown',baudRate,encoding,connected:false,error:'',wantReconnect:true,partial:Buffer.alloc(0),decoder:new TextDecoder(actual==='gbk'?'gb18030':'utf-8')});
   p.framer=new TelemetryFramer({onLine:bytes=>receiveLine(p,bytes),onFrame:frame=>{
     if(frame.gap&&frame.type!==1&&frame.type!==4)return;
     try{for(const result of p.model.ingestFrame(frame))record(p,result);}catch(error){recover(p,error.message);}
@@ -134,7 +141,7 @@ async function connect({path:portPath,baudRate=115200,encoding='auto'}) {
   device.on('data',chunk=>receive(p,chunk));
   device.on('error',e=>{p.error=e.message;line(p,e.message,'system');});
   device.on('close',()=>{
-    p.connected=false;p.raw?.end();line(p,'串口已断开','system');
+    p.connected=false;if(p.operation?.pending)finishOperation(p,false,'设备已断开，未确认模式');p.raw?.end();line(p,'串口已断开','system');
     if(p.wantReconnect){p.reconnectAt=Date.now()+2000;line(p,'设备移除，等待端口重新出现','system');}
   });
   try { await new Promise((resolve,reject)=>device.open(e=>e?reject(e):resolve())); }
@@ -149,13 +156,30 @@ async function connect({path:portPath,baudRate=115200,encoding='auto'}) {
 }
 async function disconnect(portPath) {
   const p=ports.get(portPath);if(!p)return {};
-  p.wantReconnect=false;clearTimeout(p.probeTimer);
+  p.wantReconnect=false;clearTimeout(p.probeTimer);clearTimeout(p.passiveQueryTimer);
   if(p.connected&&['binary','negotiating'].includes(p.telemetry)){try{await write(p,'swarm format text');await new Promise(resolve=>p.device.drain(()=>resolve()));}catch{}}
   if(p.device.isOpen)await new Promise(resolve=>p.device.close(()=>resolve()));
   p.connected=false;p.raw?.end();return {connected:false,path:portPath};
 }
+/** 关闭串口并移除会话；保留已写入磁盘的采集记录。 */
+async function removePort(portPath) {
+  if(typeof portPath!=='string'||!portPath||portPath.length>256)throw Error('串口路径无效');
+  const p=ports.get(portPath);if(!p)return {removed:true,path:portPath};
+  if(p.reconnecting)throw Error('串口正在重新连接，请稍后重试删除');
+  await disconnect(portPath);
+  if(p.device.isOpen)throw Error('串口关闭失败，请重试删除');
+  ports.delete(portPath);
+  if(control.paths?.includes(portPath)){
+    control.pending=false;control.error='控制使用的串口已删除';
+    control.paths=control.paths.filter(path=>path!==portPath);
+    control.results=control.results.filter(result=>result.path!==portPath);
+  }
+  return {removed:true,path:portPath};
+}
 async function write(p,command,lineEnding='crlf') {
   if(!p?.connected)throw Error('串口未连接');
+  const unsupported=commandPolicy.reason(command,p.model.nodes.get(p.nodeId));
+  if(unsupported)throw Error(unsupported);
   if(typeof command!=='string'||Buffer.byteLength(command,'utf8')>256||command.includes('\0'))throw Error('命令最多256字节，不能包含NUL');
   const ending={crlf:'\r\n',lf:'\n',none:''}[lineEnding];
   if(ending===undefined)throw Error('换行格式无效');
@@ -172,8 +196,11 @@ async function send({paths,command,lineEnding='crlf'}) {
   if(!Array.isArray(paths)||paths.length>32)throw Error('请选择发送串口');
   return Promise.all([...new Set(paths)].map(async portPath=>{
     try{
-      const p=ports.get(portPath);await write(p,command,lineEnding);
-      if(lineEnding!=='none'&&/^swarm\s+(period|stream|start|stop)\b/i.test(command)){
+      const p=ports.get(portPath);const unsupported=commandPolicy.reason(command,p?.model.nodes.get(p.nodeId));if(unsupported)throw Error(unsupported);
+      const operation=lineEnding!=='none'?commandPolicy.operation(command):null;
+      if(operation){if(operation.action==='start')setMode({path:portPath,mode:operation.mode});const result=await nodeControl({path:portPath,action:operation.action,session:operation.session});return {ok:true,...result};}
+      await write(p,command,lineEnding);
+      if(lineEnding!=='none'&&/^swarm\s+(period|stream|start|stop|broadcast|monitor)\b/i.test(commandPolicy.normalize(command))){
         clearTimeout(p.statusTimer);p.statusTimer=setTimeout(()=>{if(p.connected)write(p,'swarm status').catch(()=>{});},250);
       }
       return {path:portPath,ok:true};
@@ -181,21 +208,70 @@ async function send({paths,command,lineEnding='crlf'}) {
     catch(e){return {path:portPath,ok:false,error:e.message};}
   }));
 }
+/** 目标选择独立于设备实际模式，只在按启动/切换后发送命令。 */
+function setMode({path:portPath,mode}){
+  if(typeof portPath!=='string'||!['broadcast','monitor'].includes(mode))throw Error('节点模式参数无效');
+  const p=ports.get(portPath);if(!p)throw Error('串口不存在');
+  if(mode==='monitor'&&p.model.nodes.get(p.nodeId)?.monitorCapable!==true)throw Error('当前固件未声明纯监听能力');
+  p.targetMode=mode;return {path:portPath,targetMode:mode};
+}
+function finishOperation(p,ok,error=''){
+  const op=p.operation;if(!op?.pending)return;op.pending=false;op.ok=ok;op.error=error;op.finishedAt=Date.now();
+  clearTimeout(p.modeQuery);clearTimeout(p.modeRetry);
+  if(op.groupId&&control.pending&&control.requestId===op.groupId){
+    const actual=p.model.nodes.get(p.nodeId)?.mode||'unknown';
+    noteResult({node:p.nodeId,path:p.path,mode:actual,targetMode:op.targetMode,active:['broadcast','monitor'].includes(actual),result:ok?'ok':'fault',error,via:'usb'});
+    if(control.paths.every(portPath=>control.results.some(r=>r.path===portPath)))control.pending=false;
+  }
+  line(p,ok?`设备已确认：${op.targetMode==='monitor'?'纯监听':op.targetMode==='broadcast'?'广播测距':'已停止'}`:`模式操作未完成：${error}`,'system');
+}
+function confirmOperation(p,result){
+  const op=p.operation;if(!op?.pending||op.phase==='sending')return;
+  const f=result.fields,node=result.node;
+  if(/busy|fault|fail|error|unsupported|invalid|no_memory/i.test(f.result||'')||node.mode==='fault')op.failureCandidate=`设备返回 ${f.result||node.mode}`;
+  // 模式命令没有通用请求号：等待本次有界 status 查询的状态回包（ESP ok，旧 STM 无 result/action），避免旧排队回执误判。
+  // 查询后暂时不匹配仍继续等；有明确失败候选时，第二次复查才收敛为失败。
+  const queryStatus=f.result==='ok'||(!Object.hasOwn(f,'result')&&!Object.hasOwn(f,'action'));
+  if(result.type!=='status'||!op.queried||!queryStatus)return;
+  const sessionMatches=!op.requireSession||Number(f.boot)===op.session;
+  if(node.mode===op.targetMode&&sessionMatches&&!node.fault){finishOperation(p,true);return;}
+  if(op.failureCandidate&&op.confirmationQueries>=2)finishOperation(p,false,op.failureCandidate);
+}
+async function nodeControl({path:portPath,action,groupId=null,session:requestedSession=null}){
+  if(typeof portPath!=='string'||!['start','stop'].includes(action))throw Error('节点控制参数无效');
+  const p=ports.get(portPath);if(!p?.connected)throw Error('串口未连接');if(control.pending&&!groupId)throw Error('全局控制正在等待回执，请完成后再操作单个节点');if(!p.nodeId)throw Error('设备地址尚未确认，请先查询节点信息');
+  if(p.operation?.pending){if(action!=='stop')throw Error('该节点仍在等待上一条控制回执');finishOperation(p,false,'已被停止指令替代');}
+  const targetMode=action==='stop'?'stopped':p.targetMode||'broadcast',node=p.model.nodes.get(p.nodeId);
+  if(targetMode==='monitor'&&node?.monitorCapable!==true)throw Error('当前固件不支持纯监听');
+  const session=requestedSession??(crypto.randomBytes(4).readUInt32LE()||1);
+  if(!Number.isSafeInteger(session)||session<1||session>0xffffffff)throw Error('启动会话必须是1至4294967295');
+  const command=action==='stop'?'swarm stop':targetMode==='monitor'?'swarm monitor start':node?.monitorCapable===true?`swarm broadcast start ${session}`:`swarm start ${session}`;
+  const op=p.operation={id:operationId++,groupId,action,targetMode,pending:true,phase:'sending',startedAt:Date.now(),deadline:Date.now()+6500,error:'',ok:null,queried:false,confirmationQueries:0,session,requireSession:targetMode==='broadcast'&&node?.mode!=='broadcast'};
+  try{
+    await write(p,command);op.phase='waiting';
+    const query=()=>{if(p.connected&&p.operation===op&&op.pending){op.queried=true;op.confirmationQueries++;write(p,'swarm status').catch(error=>finishOperation(p,false,error.message));}};
+    p.modeQuery=setTimeout(query,250);p.modeRetry=setTimeout(query,1200);
+  }catch(error){finishOperation(p,false,error.message);throw error;}
+  return {path:portPath,operationId:op.id,pending:true,targetMode};
+}
 async function runControl({action,gateway,scope='radio'}) {
   if(!['start','stop'].includes(action)||!['radio','connected'].includes(scope))throw Error('控制参数无效');
   if(control.pending)throw Error('上一条全网控制仍在等待回执');
   const connected=[...ports.values()].filter(p=>p.connected);
+  const eligible=connected.filter(p=>!['monitor','fault'].includes(p.model.nodes.get(p.nodeId)?.mode));
   const requestId=crypto.randomBytes(4).readUInt32LE()||1;
-  const targets=scope==='radio' ? [ports.get(gateway)||connected[0]] : connected;
+  const targets=scope==='radio'?[gateway?ports.get(gateway):eligible[0]]:connected;
   if(!targets.length||targets.some(p=>!p?.connected))throw Error('请选择已连接的网关串口');
-  if(scope==='radio'&&!targets[0].nodeId)throw Error('网关尚未报告RAC地址，请先查询节点状态');
-  control={pending:true,action,scope,requestId,controller:targets[0].nodeId,deadline:Date.now()+6500,
-    expected:scope==='radio'?[...new Set(connected.flatMap(p=>[...p.model.nodes.keys()]))]:targets.map(p=>p.nodeId).filter(Boolean),paths:targets.map(p=>p.path),results:[],timedOut:false,error:''};
+  if(scope==='radio'&&['monitor','fault'].includes(targets[0].model.nodes.get(targets[0].nodeId)?.mode))throw Error('纯监听节点不能作为空中控制网关，请使用USB已连接节点控制');
+  if(targets.some(p=>!p.nodeId))throw Error('设备尚未报告RAC地址，请先查询节点信息');
+  const known=new Map();for(const p of connected)for(const n of p.model.nodes.values())if(!known.has(n.id)||n.id===p.nodeId)known.set(n.id,n);
+  control={pending:true,action,scope,requestId,controller:targets[0].nodeId,deadline:Date.now()+6800,
+    expected:scope==='radio'?[...known.values()].filter(n=>n.mode!=='monitor').map(n=>n.id):targets.map(p=>p.nodeId),paths:targets.map(p=>p.path),results:[],timedOut:false,error:'',excludedMonitors:scope==='radio'?[...known.values()].filter(n=>n.mode==='monitor').map(n=>n.id):[]};
   for(const p of targets){
-    const command=scope==='radio'?`broadcastsend swarm ${action} ${requestId}`:
-      action==='start'?`swarm start ${(requestId^(p.nodeId||1))>>>0||1}`:'swarm stop';
-    try{await write(p,command);}catch(e){control.error=e.message;control.pending=false;throw e;}
+    try{if(scope==='connected')await nodeControl({path:p.path,action,groupId:requestId});else await write(p,`broadcastsend swarm ${action} ${requestId}`);}
+    catch(error){if(scope==='connected')noteResult({node:p.nodeId,path:p.path,active:p.model.nodes.get(p.nodeId)?.active,result:'fault',error:error.message,via:'usb'});else{control.error=error.message;control.pending=false;throw error;}}
   }
+  if(scope==='connected'&&control.paths.every(portPath=>control.results.some(r=>r.path===portPath)))control.pending=false;
   return {requestId,scope,paths:control.paths};
 }
 async function saveExport({type,path:portPath,destination}) {
@@ -213,7 +289,7 @@ async function saveExport({type,path:portPath,destination}) {
 }
 parentPort.on('message',async ({id,method,args})=>{
   try{
-    const fn={listPorts,connect,disconnect,send,control:runControl,export:saveExport,
+    const fn={listPorts,connect,disconnect,removePort,send,control:runControl,setMode,nodeControl,export:saveExport,
       getSnapshot:()=>snapshot(false),close:async()=>{for(const p of ports.values())await disconnect(p.path);await new Promise(resolve=>csv.end(resolve));}}[method];
     if(!fn)throw Error('未知操作');
     const result=await fn(args);parentPort.postMessage({id,result});

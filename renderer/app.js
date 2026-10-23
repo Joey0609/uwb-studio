@@ -39,11 +39,13 @@
   const connectedPorts = () => state.snapshot.ports.filter(p => p.connected);
   const currentNode = () => state.snapshot.nodes.find(n => nodeId(n) === state.selected);
   const currentPort = () => state.snapshot.ports.find(p => p.path === state.activePort);
+  const modeLabel=mode=>({stopped:'已停止',broadcast:'广播测距',monitor:'纯监听',fault:'故障',unknown:'等待确认'})[mode]||'等待确认';
   const kindLabel = kind => /^stm/i.test(kind || '') ? 'STM32' : /^esp/i.test(kind || '') ? 'ESP32-C6' : kind === 'probe' ? '调试探针' : '设备类型待识别';
   const colorFor = (id, ids = state.snapshot.nodes.map(nodeId)) => COLORS[Math.max(0, ids.indexOf(String(id))) % COLORS.length];
   function ageLabel(ms) { if (!Number.isFinite(ms)) return '尚未更新'; return ms < 1000 ? `${Math.max(0, Math.round(ms))} ms 前` : `${(Math.max(0, ms) / 1000).toFixed(ms < 10000 ? 1 : 0)} s 前`; }
   function formatBytes(n) { const v = Number(n) || 0; return v < 1024 ? `${v} B` : v < 1024 * 1024 ? `${(v / 1024).toFixed(1)} KB` : `${(v / 1048576).toFixed(1)} MB`; }
-  function finiteDistance(e) { return Boolean(e && e.valid === true && Number.isFinite(Number(e.distance)) && Number(e.distance) >= 0 && (e.ageMs === undefined || Number(e.ageMs) + Math.max(0, Date.now() - Number(state.snapshot.now || Date.now())) < 1000)); }
+  function edgeTtlMs(e) { return Number(e?.ttlMs)>0?Number(e.ttlMs):3000; }
+  function finiteDistance(e) { return Boolean(e && e.valid === true && Number.isFinite(Number(e.distance)) && Number(e.distance) >= 0 && (e.ageMs === undefined || Number(e.ageMs) + Math.max(0, Date.now() - Number(state.snapshot.now || Date.now())) < edgeTtlMs(e))); }
   function measurement(e) { return finiteDistance(e) ? Number(e.distance).toFixed(3) : '—'; }
   function terminalState(path) {
     if (!state.terminal.has(path)) state.terminal.set(path, { paused: false, frozen: [], cleared: new Set(), historyIndex: -1, draft: '' });
@@ -111,11 +113,13 @@
         const top = element('div', 'port-card-top'); const chip = element('div', 'device-chip');
         const title = element('div'); const name = element('div', 'port-name', p.path); const baud = element('small'); name.append(baud);
         const device = element('div', 'port-device'); title.append(name, device);
-        const connect = button('断开', 'button port-connect', null, () => togglePort(p.path)); top.append(chip, title, connect);
+        const connect = button('断开', 'button port-connect', null, () => togglePort(p.path)); const remove = button('', 'button icon-button port-remove', 'trash', () => removePort(p.path));
+        remove.title = `删除串口 ${p.path}`; remove.setAttribute('aria-label', remove.title);
+        top.append(chip, title, connect, remove);
         const status = element('div', 'port-status'); const dot = element('span', 'status-dot');
         const label = element('span'); const counters = element('span', 'port-counters'); status.append(dot, label, counters);
         const error = element('p', 'port-error'); card.append(top, status, error); children.push(card);
-        state.portElements.set(p.path, { card, baud, device, connect, label, dot, counters, error });
+        state.portElements.set(p.path, { card, baud, device, connect, remove, label, dot, counters, error });
       }
       const add = button('添加串口', 'add-port', 'plus', () => openPorts()); add.id = 'add-port'; children.push(add);
       $('port-strip').replaceChildren(...children);
@@ -124,8 +128,8 @@
       const ui = state.portElements.get(p.path); if (!ui) continue;
       text(ui.baud, p.baudRate || $('default-baud').value);
       text(ui.device, `${kindLabel(p.kind)}${p.nodeId ? ` · ${p.nodeId}` : ''}`);
-      text(ui.connect.firstChild, p.connected ? '断开' : '连接'); ui.connect.disabled = state.busyPorts.has(p.path);
-      text(ui.label, p.connected ? '已连接' : '未连接'); ui.dot.classList.toggle('neutral', !p.connected);
+      text(ui.connect.firstChild, p.connected ? '断开' : '连接'); ui.connect.disabled = state.busyPorts.has(p.path); ui.remove.disabled = state.busyPorts.has(p.path);
+      text(ui.label,p.connected?`已连接 · ${modeLabel(p.mode)}`:'未连接'); ui.dot.classList.toggle('neutral', !p.connected);
       text(ui.counters, `↓ ${formatBytes(p.rxBytes)}  ↑ ${formatBytes(p.txBytes)}`);
       const losses = [p.dropped ? `原始记录丢弃 ${formatBytes(p.dropped)}` : '', p.droppedUi ? `显示缓冲丢弃 ${p.droppedUi} 条` : ''].filter(Boolean);
       text(ui.error, p.error || losses.join(' · ')); ui.error.hidden = !ui.error.textContent;
@@ -134,13 +138,23 @@
     text($('port-count'), `${count} / ${ports.length}`);
     text($('capture-status').lastChild, count ? `${count} 个串口采集中` : '等待连接');
     $('capture-status').querySelector('.status-dot').classList.toggle('neutral', count === 0);
-    const gatewayKey = ports.filter(p => p.connected).map(p => `${p.path}:${p.nodeId}`).join('|');
+    const gatewayKey = ports.filter(p=>p.connected&&!['monitor','fault'].includes(p.mode)).map(p=>`${p.path}:${p.nodeId}:${p.mode}`).join('|');
     if (state.gatewayKey !== gatewayKey) {
       state.gatewayKey = gatewayKey; const old = $('gateway').value || state.settings.gateway || '';
       $('gateway').replaceChildren(new Option('自动选择网关', ''));
-      for (const p of connectedPorts()) $('gateway').add(new Option(`${p.path}${p.nodeId ? ` · ${p.nodeId}` : ''}`, p.path));
+      for (const p of connectedPorts().filter(p=>!['monitor','fault'].includes(p.mode))) $('gateway').add(new Option(`${p.path}${p.nodeId ? ` · ${p.nodeId}` : ''}`, p.path));
       if ([...$('gateway').options].some(o => o.value === old)) $('gateway').value = old;
     }
+  }
+
+  /** 删除采集会话；下方面板和终端随快照同步清理。 */
+  async function removePort(path) {
+    if (state.busyPorts.has(path)) return;
+    await run(async () => {
+      requireApi(); state.busyPorts.add(path); state.dirty = true;
+      try { checkResult(await api.removePort(path)); }
+      finally { state.busyPorts.delete(path); }
+    });
   }
 
   async function togglePort(path) {
@@ -218,13 +232,15 @@
         const card = element('article', 'port-matrix-card'); card.dataset.port = port.path;
         const heading = element('div', 'port-matrix-heading'); const titles = element('div'); const name = element('h3', '', port.path); const identity = element('p', 'port-matrix-identity'); titles.append(name, identity);
         const pause = button('暂停显示', 'button small port-matrix-pause', 'pause', () => togglePortMatrix(port.path)); pause.setAttribute('aria-label', `${port.path} 暂停或恢复矩阵显示`); heading.append(titles, pause);
+        const modeRow=element('div','port-mode-controls');const modeSelect=element('select','port-mode-select');modeSelect.id=`port-mode-${state.portMatrixElements.size}`;modeSelect.setAttribute('aria-label',`${port.path} 目标模式`);modeSelect.add(new Option('广播测距','broadcast'));modeSelect.addEventListener('change',()=>run(()=>api.setMode({path:port.path,mode:modeSelect.value})));const modeStart=button('启动 / 切换','button small primary port-mode-start','play',()=>controlPort(port.path,'start'));const modeStop=button('停止','button small port-mode-stop','stop',()=>controlPort(port.path,'stop'));const modeChoice=element('span','port-mode-choice');modeChoice.append(modeSelect);modeRow.append(modeChoice,modeStart,modeStop);
+        const actualMode=element('p','port-actual-mode');const passiveInfo=element('p','port-passive-info');const modeFeedback=element('p','port-mode-feedback');modeFeedback.setAttribute('role','status');
         const timing = element('div', 'port-matrix-timing'); const updated = element('span', 'port-matrix-updated'); const age = element('span', 'port-matrix-age'); timing.append(updated, age);
         const scroll = element('div', 'port-matrix-scroll'); const table = element('table', 'distance-matrix port-distance-matrix'); table.setAttribute('aria-label', `${port.path} 独立距离矩阵`); scroll.append(table);
-        const note = element('p', 'port-matrix-note', '无向节点对 · 右上三角显示距离 · 对角线 — · 1 秒未更新显示 —');
+        const note = element('p', 'port-matrix-note', '无向节点对 · 右上三角显示距离 · 对角线 — · 3秒无有效更新显示 —');
         const footer = element('div', 'port-matrix-footer'); const status = element('span', 'port-matrix-status');
         const actions = element('div'); const node = button('节点控制', 'text-button', 'node', () => openPortNode(port.path)); const terminal = button('终端', 'text-button', 'terminal', () => openPortTerminal(port.path)); actions.append(node, terminal); footer.append(status, actions);
-        card.append(heading, timing, scroll, note, footer); grid.append(card);
-        state.portMatrixElements.set(port.path, { card, identity, pause, updated, age, table, status, node, axesKey: '', cells: new Map() });
+        card.append(heading,modeRow,actualMode,passiveInfo,modeFeedback,timing,scroll,note,footer); grid.append(card);
+        state.portMatrixElements.set(port.path, { card, identity, pause,modeChoice,modeSelect,modeStart,modeStop,actualMode,passiveInfo,modeFeedback,updated, age, table, status, node, note, axesKey: '', cells: new Map() });
       }
     }
     const now = Date.now();
@@ -236,15 +252,35 @@
       const elapsed = view.paused ? Math.max(0, now - view.frozen.at) : 0;
       const edges = new Map(rawEdges.map(e => {
         const ageMs = (Number.isFinite(Number(e.ageMs)) ? Number(e.ageMs) : updatedAt ? Math.max(0, (view.paused ? view.frozen.at : now) - Number(updatedAt)) : Infinity) + elapsed;
-        return [pairKey(e.source,e.peer), { ...e, ageMs, valid: e.valid === true && port.connected && ageMs < 1000 }];
+        return [pairKey(e.source,e.peer), { ...e, ageMs, valid: e.valid === true && ageMs < edgeTtlMs(e) }];
       }));
       text(ui.identity, `${kindLabel(port.kind)} · RAC ${port.nodeId || '等待识别'}`);
+      text(ui.note,'无向节点对 · 右上三角显示距离 · 对角线 — · 3秒无有效更新显示 —');
+      const op=port.operation,target=port.monitorCapable===true?(port.targetMode||'broadcast'):'broadcast';
+      if(port.monitorCapable===true&&ui.modeSelect.options.length===1)ui.modeSelect.add(new Option('纯监听','monitor'));
+      if(port.monitorCapable!==true&&ui.modeSelect.options.length>1)ui.modeSelect.remove(1);
+      ui.modeChoice.hidden=port.monitorCapable!==true;ui.modeSelect.value=target;
+      const startLabel=ui.modeStart.querySelector('span');if(startLabel)text(startLabel,port.monitorCapable===true?'启动 / 切换':'启动广播');
+      ui.modeSelect.disabled=!port.connected||!port.nodeId||Boolean(op?.pending);ui.modeStart.disabled=!port.connected||!port.nodeId||Boolean(op?.pending)||Boolean(state.snapshot.control?.pending);ui.modeStop.disabled=!port.connected||!port.nodeId||Boolean(state.snapshot.control?.pending);
+      text(ui.actualMode,`实际：${modeLabel(port.mode)}${port.mode==='monitor'?' · 只接收，不发送UWB帧':!port.monitorCapable?' · 当前固件仅支持广播':''}`);ui.actualMode.dataset.mode=port.mode||'unknown';
+      const passive=port.passive,ownValid=[...edges.values()].filter(e=>finiteDistance(e)&&(String(e.source)===String(port.nodeId)||String(e.peer)===String(port.nodeId))).length;
+      const passiveReasons={disabled:'已关闭',insufficient:'数据不足',window:'窗口超限',degenerate:'布局退化',ambiguous:'候选解不唯一',failed:'解算未通过',ok:'已得到结果'};
+      ui.passiveInfo.hidden=port.monitorCapable!==true||port.passiveCapable!==true;
+      const graph=port.passiveGraph===true;
+      const passiveReason=passive?({pending:'等待图数据',budget:'计算预算不足',memory:'内存不足',...passiveReasons}[passive.reason]||'设备状态：'+passive.reason):'';
+      const recent=passive?`${passive.enabled?'开启':'关闭'} / ${passive.windowMs}ms / ${passiveReason}（${timeText(passive.receivedAt)}）`:'';
+      const graphCounts=passive?.schema==='graph'?`发现 ${passive.nodes}/${port.passiveMaxNodes||20} · 联合 ${passive.usedNodes}节点/${passive.usedEdges}边 · 新鲜证据 ${passive.edges}边 · 分量 ${passive.components} · 回执自身 ${passive.validNodes}条`:'等待图统计';
+      text(ui.passiveInfo,port.mode!=='monitor'?`${graph?'自动图定位':'自身定位'}：${port.passiveReady===false?'资源未就绪，请查询设备状态':'进入纯监听后默认开启'}`:!passive?`${graph?'自动图定位':'自身定位'}：等待设备状态回执`:`${graph?'自动图定位':'自身定位（旧版固定四节点）'}：当前自身距离 ${ownValid} 条；${now-passive.receivedAt>3000?'状态待刷新 · ':''}${graph?graphCounts+'；':''}最近回执 ${recent}`);
+      ui.passiveInfo.dataset.schema=graph?'graph':'fixed4';
+      ui.passiveInfo.title='当前自身距离仅来自本串口有效矩阵；节点、边和分量统计属于带时间的最近设备回执，手动查询更新，不持续轮询。';
+      const feedback=op?.pending?`正在请求${modeLabel(op.targetMode)}，等待设备回执…`:op?.ok===false?`未确认：${op.error||'设备未完成操作'}`:op?.ok===true?`设备已确认：${modeLabel(op.targetMode)}`:'';
+      text(ui.modeFeedback,feedback);ui.modeFeedback.hidden=!feedback;ui.modeFeedback.classList.toggle('error',op?.ok===false);ui.modeFeedback.classList.toggle('pending',Boolean(op?.pending));
       text(ui.updated, updatedAt ? `更新 ${timeText(updatedAt)}` : '更新 —');
       const ages = [...edges.values()].map(e => e.ageMs).filter(Number.isFinite); const minAge = ages.length ? Math.min(...ages) : null; const maxAge = ages.length ? Math.max(...ages) : null;
       text(ui.age, minAge === null ? '测量年龄 —' : `测量年龄 ${Math.round(minAge)}${Math.round(maxAge) !== Math.round(minAge) ? `–${Math.round(maxAge)}` : ''} ms`);
       ui.card.classList.toggle('is-paused', view.paused); ui.card.classList.toggle('is-disconnected', !port.connected);
       const pauseLabel = view.paused ? '恢复显示' : '暂停显示'; if (ui.pause.dataset.paused !== String(view.paused)) { ui.pause.dataset.paused = String(view.paused); ui.pause.replaceChildren(icon(view.paused ? 'play' : 'pause'), element('span', '', pauseLabel)); }
-      text(ui.status, view.paused ? '显示已暂停 · 采集继续' : port.connected ? '● 独立接收中' : '○ 已断开 · 观测失效'); ui.node.disabled = !port.nodeId;
+      text(ui.status, view.paused ? '显示已暂停 · 采集继续' : port.connected ? '● 独立接收中' : '○ 已断开 · 距离按3秒到期'); ui.node.disabled = !port.nodeId;
       if (ui.axesKey !== axesKey || !ui.table.children.length) {
         ui.axesKey = axesKey; ui.cells.clear(); const head = element('thead'); const header = element('tr'); header.append(element('th', '', '节点 / 对端'));
         axes.forEach(n => { const cell = element('th', '', nodeId(n)); cell.scope = 'col'; header.append(cell); }); head.append(header); const body = element('tbody');
@@ -264,6 +300,7 @@
       }
     }
   }
+  async function controlPort(path,action){await run(async()=>{requireApi();checkResult(await api.nodeControl({path,action}));});}
   function selectNode(id) {
     state.selected = id; state.detailKey = ''; state.historyOptionsKey = ''; state.dirty = true; state.chartDirty = true;
     if (id !== null) { const n = currentNode(); if (n?.port) state.activePort = n.port; }
@@ -302,7 +339,7 @@
       const neighbors = button('查询邻居', 'text-button', null, () => sendNode('neighbors')); neighbors.style.marginTop = '6px'; configuration.append(neighbors);
       const meta = element('div', 'node-meta'); meta.id = 'node-meta'; configuration.append(meta); controls.append(configuration); host.append(controls);
     }
-    const status = $('detail-active'); text(status, n.active === true ? '● 测距运行中' : n.active === false ? '○ 已停止' : '○ 状态待确认'); status.classList.toggle('inactive', !n.active);
+    const status = $('detail-active'); text(status,`实际：${modeLabel(port?.mode||n.mode)}`); status.classList.toggle('inactive', !n.active);
     for (const edge of edges) {
       const ui = state.detailElements.get(pairKey(edge.source,edge.peer)); if (!ui) continue;
       text(ui.number,measurement(edge));
@@ -319,8 +356,7 @@
   async function sendNode(subcommand) {
     await run(async () => {
       const n = currentNode(); if (!n?.port) throw new Error('该节点没有可用的本机串口，请选择已连接节点或使用全网控制。');
-      const command = `swarm ${subcommand === 'start' ? `start ${randomSession()}` : subcommand}`;
-      await sendCommands([n.port], command, 'crlf');
+      if(['start','stop'].includes(subcommand))checkResult(await api.nodeControl({path:n.port,action:subcommand}));else await sendCommands([n.port],`swarm ${subcommand}`,'crlf');
     });
   }
   async function applyNodePeriod() {
@@ -335,6 +371,7 @@
   }
 
   function renderControl() {
+    text($('control-mode-hint'),$('control-scope').value==='connected'?'USB逐口执行各自的目标模式；停止逐口确认。':'空中全网仅控制广播测距；纯监听请用USB启动和停止。');
     const c = state.snapshot.control || {}; const key = JSON.stringify(c); if (key === state.controlKey) return; state.controlKey = key;
     $('network-start').disabled = Boolean(c.pending); $('network-stop').disabled = Boolean(c.pending);
     const feedback = $('control-feedback'); const results = Array.isArray(c.results) ? c.results : [];
@@ -347,8 +384,10 @@
     if (!c.pending && unknown) messages.push('未确认节点的状态仍未知；请检查设备和网关，不以指令发出代表执行成功。');
     if (c.error) messages.push(String(c.error));
     if (c.timedOut) messages.push('等待设备确认已超时。');
-    if ((c.scope || $('control-scope').value) === 'radio') messages.push('无线确认仅覆盖已观测节点；尚未发现的设备状态仍未知。');
-    if (results.length) messages.push(results.map(r => `${r.node ?? r.port ?? '节点'}：${typeof r.result === 'string' ? r.result : r.active === target ? '已确认' : '待确认'}`).join('  '));
+    if ((c.scope || $('control-scope').value) === 'radio') messages.push('空中控制仅启动广播模式；纯监听节点不响应，请使用USB已连接节点控制。');
+    if(c.scope==='radio'&&c.excludedMonitors?.length)messages.push(`纯监听不计入空中ACK预期：${c.excludedMonitors.join('、')}`);
+    if(c.scope==='connected'&&c.action==='start')messages.push('按各串口选择的目标模式分别启动，以设备回执确认实际状态。');
+    if (results.length) messages.push(results.map(r => `${r.node??r.path??'节点'}：${r.result==='ok'?modeLabel(r.mode||(r.active?'broadcast':'stopped')):r.error||r.result||'待确认'}`).join('  '));
     feedback.hidden = false; feedback.classList.toggle('error', !c.pending && unknown > 0); text(feedback, messages.join('\n'));
   }
   async function networkControl(action) {
@@ -373,7 +412,7 @@
     if (canvas.width !== Math.round(w * ratio) || canvas.height !== Math.round(h * ratio)) { canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio); }
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, w, h);
     const style = getComputedStyle(document.documentElement); const muted = style.getPropertyValue('--muted').trim(); const line = style.getPropertyValue('--line').trim();
-    const now = Number(state.snapshot.now) || Date.now(); const range = Number($('history-window').value); const start = now - range;
+    const now = Date.now(); const range = Number($('history-window').value); const start = now - range;
     const filter = $('history-peer').value; const edges = relevantEdges().filter(e => !filter || pairKey(e.source,e.peer) === filter);
     const series = edges.map((e, i) => ({ edge: e, color: COLORS[i % COLORS.length], points: (Array.isArray(e.history) ? e.history : []).slice(-1800).filter(p => Number(p.t) >= start && Number(p.t) <= now) }));
     let max = 0, min = Infinity, pointCount = 0;
@@ -387,7 +426,7 @@
     for (let i = 0; i < 5; i++) { ctx.textAlign = i === 0 ? 'left' : i === 4 ? 'right' : 'center'; ctx.fillText(new Date(start + i * range / 4).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', ...(range <= 60000 ? { second: '2-digit' } : {}) }), left + i * width / 4, h - 6); }
     for (const s of series) {
       const stride = Math.max(1, Math.ceil(s.points.length / 600)); const period = state.snapshot.nodes.find(n => nodeId(n) === idOf(s.edge.source))?.periodMs || 200;
-      const maxGap = 1000; let previous = null, lastRawTime = null, broken = true; ctx.beginPath(); ctx.strokeStyle = s.color; ctx.lineWidth = 1.7;
+      const maxGap = edgeTtlMs(s.edge); let previous = null, lastRawTime = null, broken = true; ctx.beginPath(); ctx.strokeStyle = s.color; ctx.lineWidth = 1.7;
       for (let i = 0; i < s.points.length; i++) {
         const p = s.points[i];
         if (!Number.isFinite(p.v) || p.v < 0) { previous = null; lastRawTime = null; broken = true; continue; }
@@ -445,8 +484,15 @@
     $('command-input').disabled = connectedPorts().length === 0; $('command-form').querySelector('button').disabled = connectedPorts().length === 0;
     renderQuickCommands();
   }
+  /** 自动图固件的配置始终只发当前USB口；兼容前缀不绕过能力检查。 */
+  const commandPolicy=window.UwbCommandPolicy;
+  const passiveCommand=commandPolicy.isPassive;
+  const obsoleteGraphCommand=commandPolicy.obsolete;
   function renderQuickCommands() {
-    const quick = state.settings.quickCommands || []; const key = JSON.stringify(quick); if (state.quickKey === key) return; state.quickKey = key;
+    const passiveQuick=[{label:'自身定位状态',command:'swarm monitor status'},{label:'开启自身定位',command:'swarm monitor locate on'},{label:'关闭自身定位',command:'swarm monitor locate off'},{label:'定位窗口1000ms',command:'swarm monitor window 1000'},{label:'高度差…',command:'swarm monitor height <米>'},{label:'时间戳证据',command:'swarm monitor evidence'}];
+    const saved=state.settings.quickCommands||[];
+    const quick=currentPort()?.passiveCapable===true?[...saved,...passiveQuick.filter(q=>!saved.some(s=>s.command===q.command))]:saved;
+    const key = `${state.activePort}|${currentPort()?.monitorCapable}|${currentPort()?.passiveCapable}|${currentPort()?.passiveGraph}|${JSON.stringify(quick)}`; if (state.quickKey === key) return; state.quickKey = key;
     const children = quick.map(q => {
       const b = button(q.label || q.command, 'quick-command', null, () => {
         const parameter = /<[^>]+>/.exec(q.command);
@@ -456,7 +502,7 @@
           toast('请填写选中的参数，再发送指令。');
         } else run(() => sendCurrent(q.command));
       });
-      b.title = q.command; return b;
+      b.title=q.command;const unsupported=commandPolicy.reason(q.command,currentPort());if(unsupported){b.disabled=true;b.title=unsupported+'（保存的快捷指令仍保留）';}return b;
     });
     children.push(button('编辑快捷指令', 'quick-command quick-edit', 'settings', () => openSettings())); $('quick-commands').replaceChildren(...children);
   }
@@ -472,7 +518,10 @@
   }
   async function sendCurrent(command) {
     const value = String(command || ''); if (!value.trim()) return;
-    const ports = $('send-all').checked ? connectedPorts().map(p => p.path) : currentPort()?.connected ? [state.activePort] : [];
+    const passiveOnly=passiveCommand(value);
+    if(currentPort()?.passiveGraph===true&&obsoleteGraphCommand(value))throw Error('自动图定位不使用固定节点组或手动布局，请直接启动纯监听');
+    const ports = passiveOnly ? (currentPort()?.connected ? [state.activePort] : []) : $('send-all').checked ? connectedPorts().map(p => p.path) : currentPort()?.connected ? [state.activePort] : [];
+    for(const path of ports){const unsupported=commandPolicy.reason(value,state.snapshot.ports.find(p=>p.path===path));if(unsupported)throw Error(`${path}：${unsupported}`);}
     await sendCommands(ports, value, $('line-ending').value);
     for (const historyKey of ports) {
       const history = state.commandHistory.get(historyKey) || [];
@@ -559,6 +608,10 @@
     const ports = Array.isArray(snapshot.ports) ? snapshot.ports : [];
     const livePaths = new Set(ports.map(p => p.path));
     for (const path of state.lineCache.keys()) if (!livePaths.has(path)) state.lineCache.delete(path);
+    for (const cache of [state.terminal, state.commandHistory, state.portMatrixViews]) {
+      for (const path of cache.keys()) if (!livePaths.has(path)) cache.delete(path);
+    }
+    for (const path of state.selectedPorts) if (!livePaths.has(path)) state.selectedPorts.delete(path);
     const mergedPorts = ports.map(p => {
       const incoming = Array.isArray(p.lines) ? p.lines : [];
       let lines;
@@ -581,6 +634,7 @@
     if (t - state.lastRender >= 100) {
       if (nextSnapshot) { state.snapshot = { ports: [], nodes: [], edges: [], control: {}, recording: {}, ...nextSnapshot }; nextSnapshot = null; state.chartDirty = true; }
       state.lastRender = t; state.dirty = false; render();
+      if(Date.now()-Number(state.snapshot.now||0)>=100)state.chartDirty=true;
       if (state.chartDirty) { renderChart(); state.chartDirty = false; }
     }
     requestAnimationFrame(frameLoop);

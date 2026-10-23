@@ -7,6 +7,7 @@
   <title>UWB Studio</title>
   <link rel="stylesheet" href="style.css">
   <script src="dropdowns.js" defer></script>
+  <script src="command-policy.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -39,7 +40,7 @@
       <button class="nav-button" data-nav="nodes" aria-label="节点"><svg><use href="#i-node"/></svg><span>节点</span></button>
       <button class="nav-button" data-nav="terminal" aria-label="串口终端"><svg><use href="#i-terminal"/></svg><span>终端</span></button>
     </nav>
-    <div class="rail-bottom"><button class="nav-button" id="open-settings" aria-label="设置"><svg><use href="#i-settings"/></svg><span>设置</span></button><div class="rail-version">SRv2</div></div>
+    <div class="rail-bottom"><button class="nav-button" id="open-settings" aria-label="设置"><svg><use href="#i-settings"/></svg><span>设置</span></button><div class="rail-version">1.4.3</div></div>
   </aside>
 
   <div class="app-shell">
@@ -55,13 +56,13 @@
       </section>
 
       <section class="panel overview-panel" id="overview-section" aria-labelledby="matrix-title">
-        <div class="workspace-toolbar"><div><h2 id="matrix-title">各串口独立距离矩阵</h2><p>同屏比较各设备实际收到的数据与更新时间</p></div><div class="network-actions"><select id="control-scope" aria-label="全网控制范围"><option value="radio">无线全网</option><option value="connected">已连接节点</option></select><select id="gateway" aria-label="全网控制网关"><option value="">自动选择网关</option></select><button class="button primary" id="network-start"><svg><use href="#i-play"/></svg>全部开始</button><button class="button" id="network-stop"><svg><use href="#i-stop"/></svg>全部停止</button></div></div>
-        <div id="control-feedback" class="control-feedback" hidden aria-live="polite"></div>
+        <div class="workspace-toolbar"><div><h2 id="matrix-title">各串口独立距离矩阵</h2><p>同屏比较各设备实际收到的数据与更新时间</p></div><div class="network-actions"><select id="control-scope" aria-label="全网控制范围"><option value="radio">无线全网</option><option value="connected">USB已连接节点</option></select><select id="gateway" aria-label="全网控制网关"><option value="">自动选择网关</option></select><button class="button primary" id="network-start"><svg><use href="#i-play"/></svg>全部开始</button><button class="button" id="network-stop"><svg><use href="#i-stop"/></svg>全部停止</button></div></div>
+        <p id="control-mode-hint" class="control-mode-hint"></p><div id="control-feedback" class="control-feedback" hidden aria-live="polite"></div>
         <div class="port-matrix-grid" id="port-matrix-grid" aria-label="每个串口自己的独立距离矩阵"><div class="empty-state port-matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>连接设备，同时查看各自的距离矩阵</h3><p>每张卡只显示该串口收到的观测，未收到的节点对显示 —。</p><button class="button primary" id="port-matrix-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div></div>
         <details id="aggregate-view" class="aggregate-view"><summary>汇总查看 <span>按观察串口查看矩阵及节点控制</span></summary>
         <div class="node-tabs" id="node-tabs" aria-label="选择节点"></div>
         <div class="matrix-workspace">
-          <div class="matrix-area"><div class="matrix-caption"><span>节点 A ↓ <span class="separator">/</span> 节点 B →</span><span>单位 m <span class="subtle">· 过期显示 —</span></span></div><div class="matrix-scroll" id="matrix-scroll"><div class="empty-state matrix-empty" id="matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>等待第一条真实测量</h3><p>添加设备串口并开始测距，节点会自动出现在这里。</p><button class="button primary" id="empty-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div><table class="distance-matrix" id="distance-matrix" hidden aria-label="当前串口无向距离矩阵"></table></div><div class="matrix-footnote"><svg><use href="#i-info"/></svg>当前选中串口的独立观测；左下三角遮色，对角线为 —，右上三角1秒无新数据显示 —。</div></div>
+          <div class="matrix-area"><div class="matrix-caption"><span>节点 A ↓ <span class="separator">/</span> 节点 B →</span><span>单位 m <span class="subtle">· 过期显示 —</span></span></div><div class="matrix-scroll" id="matrix-scroll"><div class="empty-state matrix-empty" id="matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>等待第一条真实测量</h3><p>添加设备串口并开始测距，节点会自动出现在这里。</p><button class="button primary" id="empty-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div><table class="distance-matrix" id="distance-matrix" hidden aria-label="当前串口无向距离矩阵"></table></div><div class="matrix-footnote"><svg><use href="#i-info"/></svg>当前选中串口的独立观测；左下三角遮色，对角线为 —，右上三角3秒无有效距离更新显示 —；串口-1不清空。</div></div>
           <aside class="node-detail" id="node-detail" aria-label="选中节点详情"><div class="empty-state detail-empty"><svg><use href="#i-node"/></svg><p>选择节点，查看观测与控制。</p></div></aside>
         </div>
         </details>

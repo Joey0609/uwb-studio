@@ -1,4 +1,24 @@
-# 验证摘要
+# UWB Studio 1.4.3 当前验证（2026-10-23）
+
+当前版本使用统一界面，按每口固件的INFO能力声明隐藏或开放功能。无 `monitor=1` 的广播基线只显示“启动广播”和“停止”；旧固件本地启停发送 `swarm start [session]` / `swarm stop`。新监听分支仍可选择广播/监听，定位配置和统计只有能力完整声明时才开放。连接不自动启动、切换或发射UWB。
+
+所有本地启停（模式按钮、默认快捷、用户保存或手工输入，含大小写及 `uwb/stm/stm32/esp/esp32` 和中英文冒号）统一进入采集进程的设备确认流程；写串口成功仅为pending，250ms和1200ms有界状态查询后才确认，busy、错误、无回执按失败或超时显示。保存的监听/定位快捷在广播固件上禁用但不删除。空中全网仍是 `broadcastsend swarm start/stop`，ACK必须匹配控制器和请求号。
+
+所有距离均从电脑接收最后一条有效距离开始计3秒；收到 `-1` 只保存CSV/原始记录，不改矩阵、不续期、不追加历史。相同数值的新DATA可续期，重复SNAPSHOT不能续期或复活旧值。停止、协议重置或临时断开不提前清除，也不延长结果。每口独立矩阵和汇总查看不跨口填数。
+
+## 本轮通过项目与证据边界
+
+- 语法检查：生产Model、worker、共享command-policy和renderer通过。
+- 广播基线模拟：生产Model/worker使用内存串口与文件桩，覆盖旧INFO/STATUS、有/无result的状态确认、文本与二进制、按请求关联ACK、busy及超时、前缀/大小写能力防绕过；兼容新监听固件。未枚举、打开或操作真实设备。
+- 原显示规则回归：7组模型场景及生产worker的原始字节先记录、CSV保留无效值、数据隔离、3秒到期和重复快照防续期通过。
+- 真实Electron GUI隔离验证：装载最终打包生产程序，合成两口（明确标记MOCK_BASELINE / MOCK_MONITOR），广播口隐藏监听/定位、新能力仍可操作；保存的前缀监听指令在旧口禁用；启停写入不误报成功；浅深主题及弹性下拉键盘交互正常；停止快照推送后UI仍自行3秒失效；零pageerror。合成数值不是真实测距证据，未接真实串口，未改变用户正在运行程序的会话。
+- Electron45 x64便携构建通过，产物 `release/UWB-Studio-1.4.3-x64.exe`；生产源码与打包ASAR逐项核对另见ESP构建记录。无需因为本次Studio兼容修复重刷固件。
+
+测试代码、数据、日志和截图仅位于 `E:/Multi_target_localization/UWB-Multi-Ranging-Esp/build/branch_split/studio143/`：`compat_results.json`、`receive_ttl_regression.json`、`gui/result.json`、浅深截图和 `build.log`。这些不混入本应用交付源码。未执行新硬件验收；下文旧实机结果只证明当时对应版本，不能替代本轮验证。
+
+---
+
+# 历史验证记录（1.1.x起）
 
 2026-10-22已完成以下验证。按用户要求，测试代码、合成数据、测试截图、临时记录及测试专用依赖已从工程移出，本文件保留历史结论与限制，不提供已移除测试脚本的运行入口。
 
@@ -20,7 +40,7 @@
 
 ## 行为与限制
 
-每口矩阵仅使用该口收到的数据，不抄全局矩阵，不人为制造差值或延迟。当前固件只上报本节点解算行，其余未知格显示—；汇总视图额外组合已上传的行。
+本段为早期只上报本机测距行版本的历史记录，不能作为当前功能说明。当前每口矩阵与汇总查看都只使用所选观察串口的数据；允许该节点固件直接解算及第三方重建的节点对，不跨口组合或补数。
 
 DW1000标准/扩展PHR不能互通，因此全网控制各发送三次两种格式并收集真实ACK，网关约4.6秒停止自身测距发送。控制过渡不作为稳态门槛；未发现节点总数未知，不能把发现节点确认写成未知全网全部成功。
 
@@ -34,7 +54,7 @@ DW1000标准/扩展PHR不能互通，因此全网控制各发送三次两种格�
 - 模型及USB协议：固定期望值、1秒边界、-1、独立观察者、相同值新DATA、SNAPSHOT不刷新年龄/历史、20邻居210节点对、未知表/非法浮点、COBS长度0..509、混合文字与任意分片、CRC、序号回绕/缺批均通过。
 - 用模拟SerialPort运行实际采集进程：连接仅info→binary；第三方端点不绑定当前串口；缺批清结果并请求snapshot；二进制不进入文字终端；无2秒状态轮询；正常断开恢复text；新CSV字段均通过。没有打开真实串口。
 - 实际Chrome隔离界面：三口独立值、每口自有坐标轴、右上三角、仅下三角遮色、对角线—、完全停止送快照后仍1秒过期、浅深主题、Q弹菜单键盘选择、终端最多500行、3口×21节点共630pair压力均通过，无JS异常。最满容量合成压力下RAF p95约49.9ms，不能等同三节点实测刷新性能。
-- 截图 `design-previews/third-party-ui/light.png`、`dark.png` 标为示例串口，只用于布局检查。
+- 截图 `E:/Multi_target_localization/UWB-Multi-Ranging-Esp/build/monitor_validation/electron_screenshots/third-party-ui/light.png`、`dark.png` 标为示例串口，只用于布局检查。
 - 没有恢复用户已移出的测试目录，临时脚本保存在系统Temp；正式应用没有演示数据入口。
 
 真实ESP/STM烧录、六时间戳证据、五分钟覆盖率、USB减量、断电/热点负载及打包版验收由主工程继续记录。
@@ -68,3 +88,61 @@ ESP/STM新固件均已烧录。最终固件实际Electron三口300秒（主工�
 ## 本轮提交清理
 
 测试截图、临时release-diagonal、专项GUI脚本及仅测试使用的Playwright模块已移出工程，归档为 `E:/Multi_target_localization/_test_archive/third-party-commit-20261022-205727`。本文件中的build、截图和脚本路径是历史记录，不再作为当前运行入口；源码启动和打包只依赖package.json声明的依赖。正式1.1.1便携包、生产解析/采集/渲染代码和使用文档保留。清理后生产JS语法与ASAR一致性检查通过，未中断用户当前串口采集。
+
+
+## 2026-10-22 1.2.0 广播/纯监听（软件验证）
+
+本节为隔离及模拟检查，不作为新模式固件实机通过证据。
+
+- 模拟实际采集进程：新固件能力透传、旧固件回退、连接不自启、选目标不发命令、write成功后仍pending、查询确认实际mode、busy保留旧mode、超时、监听禁止网关/排除ACK、USB各口不同模式批量启动和逐口停止均通过。
+- 模型：实际模式改变和RESET清旧有效值但保留历史及断点，忙/失败而模式不变保留有效结果，监听active=1、fault/stop、旧状态推断广播均通过。
+- 主进程与preload隔离模拟：错误窗口来源、非法path/mode/action拒绝，剔除renderer伪造groupId，冻结窄接口，用户自定义快捷不覆盖及新默认快捷均通过。
+- 真实Chrome隔离UI：三口不同角色、目标/实际分离、选择不启动、pending/busy/确认反馈、监听排除网关、旧固件不能选监听且监听快捷禁用、USB批量入口、浅深主题和Q弹/reduced-motion通过，无JS异常。示例截图在 `E:/Multi_target_localization/UWB-Multi-Ranging-Esp/build/monitor_validation/electron_screenshots/monitor-mode/`，不包含硬件测量数据。
+- 原上三角、对角—、左下遮色、1秒无消息过期及三口630pair压力检查通过，终端500行上限保留。既有COBS任意分片、CRC/缺批/丢零恢复及实际旧STM日志1570种分片从外部归档复验通过。
+- 临时检查脚本位于系统Temp，浏览器依赖复用外部测试归档，没有恢复工程内测试目录或加入生产测试依赖。本轮未打开真实串口。新模式烧录和实机静默监听、切换恢复、计数验收由主固件工程单独记录。
+
+
+### 1.2.0 集成复查补充
+
+读取本轮真实 `build/monitor_validation/hardware_stm_monitor/COM18.raw` 的完整STM INFO、`action=start result=started` ACK、以及不带action/result的实际查询status作为fixture。确认状态机只在本次query阶段接受无action/result的STM查询行，命令ACK不冒充query；ESP `result=ok` 仍兼容。busy请求不再乐观清矩阵，失败且实际mode未改变时仍保留新鲜结果；测试用持续更新的原模式测量验证。INFO和STATUS的mode=fault均设置故障状态。
+
+
+### 1.2.0 打包版真实三串口 GUI 验收
+
+使用 `release/win-unpacked/UWB Studio.exe` 1.2.0，通过真实 preload、utility采集进程和COM15/16/18完成模式操作；没有连接COM17调试器或COM1/2虚拟串口。证据位于：
+
+`E:/Multi_target_localization/UWB-Multi-Ranging-Esp/build/monitor_validation/electron_screenshots/real_gui_1.2_2026-10-22T13-54-38-504Z/`
+
+- 逐口停止并恢复200ms；USB批量按15/16广播、18监听启动，三口均由查询确认。STM当前live查询有 `result=ok`；旧无result格式的通过证据为前述真实raw fixture回放，两者未混称同次实机。
+- STM监听矩阵中只有两个ESP之间的真实pair，自身到两ESP为“—”，对角线“—”，左下遮色；每口来自自身串口。该轮测得的peerpair有效值/年龄可在final-snapshot和raw核对。
+- 监听串口从网关下拉排除，尝试以COM18作radio网关被真实API拒绝，txBytes没有增加。
+- COM15卡片经实际鼠标选择监听，选择本身没有改变实际mode；按启动后查询确认监听，hw_tx在约1.8秒检查窗口内未增加；随后USB恢复mixed并重新收到peerpair。
+- 最终COM15/16广播、COM18监听，三口period=200ms，协议错误均0，无页面JS异常。正常断开，等待写盘后正常关闭自己实例，三口全部释放。
+- 保存 `real-mixed-light.png`、`real-mixed-dark.png` 为真实COM口/实际地址截图，不是示例图。此轮未发现第四RAC，不能据此宣称四节点通过，也不是五分钟覆盖率验收。
+
+首轮在Playwright option.click等待弹性选项稳定/自动滚动时超时，第二轮扫描时COM18暂时移除，均保留failed记录。最终预先滚动到控件、等待展开动画后，以鼠标移动/坐标点击真实选项通过；诊断确认打开时select仍为同一DOM且aria-expanded=true，10Hz刷新未重建下拉。没有为此修改生产代码，也没有用键盘绕过后宣称鼠标可用。
+
+
+### 1.2.0 最终控制反馈范围修正
+
+USB已连接节点控制不再显示“纯监听不计入空中ACK预期”名单；该提示仅用于radio空中控制，避免把请求开始时的旧监听角色显示在USB混合启动结果中。USB worker返回空排除列表，界面也按scope过滤。隔离worker/UI分别验证USB不显示、radio保留提示。本次未改变模式控制、解析或测量逻辑，未占串口；前述真实截图保留实际采集时的旧文案，不修改实物图片。
+
+
+### 1.2.0 最终便携构建
+
+- 构建：electron-builder 26.15.3 / Electron45，临时压缩级别5，退出0。
+- 文件：`release/UWB-Studio-1.2.0-x64.exe`，113065658字节。
+- SHA256：`CEF73A967E78A7DCD19DCF58E1A939B2CD8227C2F0CEE676D724A0E3E6EF6D31`。
+- ASAR SHA256：`600DFB92D99F663B4AD8BF4F8E492B5581BE5D38C9F9560A0B239AA70AF76014`。
+- ASAR内版本1.2.0；telemetry/model/serial-worker/main/preload及renderer app/index/style共8个生产文件逐一与当前源码hash一致。最终增量仅调整USB/radio反馈提示范围，实际模式/测量逻辑维持前述真实GUI通过版本。
+
+
+### 最终CEF73包：四节点只读真实GUI验收
+
+证据目录：`E:/Multi_target_localization/UWB-Multi-Ranging-Esp/build/monitor_validation/electron_screenshots/real_gui_four_nodes_2026-10-22T14-07-06-839Z/`。summary为passed=true，exe SHA256为最终 `CEF73A967E78A7DCD19DCF58E1A939B2CD8227C2F0CEE676D724A0E3E6EF6D31`。
+
+- 仅连接COM15、COM16、COM18，查询实际15/16广播、18监听、周期均200ms。真实串口发送白名单只有info/format/status/snapshot，没有start/stop/broadcastsend，不改变独立供电节点。
+- 通过真实帧发现第四RAC `1880449296`。COM18登记四地址，三组广播节点对 `740078382/790411239`、`740078382/1880449296`、`790411239/1880449296` 均收到有效新值。监听者RAC `1885298961` 自身的三条边保持“—”，下三角遮色，对角线“—”。
+- COM15/16矩阵仅使用各自端口数据；实物截图显示独立值和接收年龄差异，没有从COM18或其他口补值。监听期间hw_tx不增加，0页面错误。
+- 截图前仅选择本机UI的COM18监听目标，未执行模式操作，并验证txBytes不增加。`real-four-nodes-light.png`、`real-four-nodes-dark.png` 均为实际COM口与四个真实RAC，不是示例图。
+- 最后正常断开三口、等待写盘、正常关闭自己的应用实例，三口释放。此轮是最终包的数据来源/显示验证，五分钟持续覆盖率由主固件验证记录单独给出。

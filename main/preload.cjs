@@ -3,8 +3,9 @@ const {contextBridge, ipcRenderer} = require('electron');
 const invoke=(name,args)=>ipcRenderer.invoke('uwb:'+name,args);
 contextBridge.exposeInMainWorld('uwb',Object.freeze({
   listPorts:()=>invoke('listPorts'),connect:args=>invoke('connect',args),
-  disconnect:path=>invoke('disconnect',path),send:args=>invoke('send',args),
-  control:args=>invoke('control',args),export:args=>invoke('export',args),
+  disconnect:path=>invoke('disconnect',path),removePort:path=>invoke('removePort',path),send:args=>invoke('send',args),
+  control:args=>invoke('control',args),
+  setMode:args=>invoke('setMode',args),nodeControl:args=>invoke('nodeControl',args),export:args=>invoke('export',args),
   getSettings:()=>invoke('getSettings'),setSettings:patch=>invoke('setSettings',patch),
   getSnapshot:()=>invoke('getSnapshot'),
   copyText:value=>invoke('copyText',value),
