@@ -2,6 +2,8 @@
 
 /* 原生select仅保存值；可访问的自定义面板负责交互，动画只由用户展开时触发。 */
 (() => {
+  /** @brief 与工作台共用本地Lucide图标，不在下拉组件中手绘图形。 */
+  const icon=name=>{const svg=document.createElementNS('http://www.w3.org/2000/svg','svg'),use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#i-'+name);svg.setAttribute('aria-hidden','true');svg.append(use);return svg;};
   const controls = new Map(); let current = null; let serial = 0;
   const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
   class Dropdown {
@@ -11,7 +13,7 @@
       this.host = document.createElement('span'); this.host.className = 'bouncy-select'; this.host.dataset.for = id;
       this.trigger = document.createElement('button'); this.trigger.type = 'button'; this.trigger.className = 'dropdown-trigger'; this.trigger.id = `${this.id}-trigger`;
       this.trigger.setAttribute('role', 'combobox'); this.trigger.setAttribute('aria-haspopup', 'listbox'); this.trigger.setAttribute('aria-expanded', 'false'); this.trigger.setAttribute('aria-controls', `${this.id}-list`);
-      this.label = document.createElement('span'); this.label.className = 'dropdown-label'; const arrow = document.createElement('i'); arrow.className = 'dropdown-chevron'; arrow.setAttribute('aria-hidden', 'true'); this.trigger.append(this.label, arrow);
+      this.label = document.createElement('span'); this.label.className = 'dropdown-label'; const arrow = icon('chevron-down'); arrow.setAttribute('class','dropdown-chevron'); arrow.setAttribute('aria-hidden', 'true'); this.trigger.append(this.label, arrow);
       this.panel = document.createElement('div'); this.panel.className = 'dropdown-panel'; this.panel.id = `${this.id}-list`; this.panel.setAttribute('role', 'listbox'); this.panel.hidden = true;
       this.host.append(this.trigger, this.panel); source.after(this.host); source.hidden = true; source.tabIndex = -1; source.setAttribute('aria-hidden', 'true');
       this.trigger.addEventListener('click', event => { event.preventDefault(); this.opened ? this.close() : this.open(); });
@@ -27,7 +29,7 @@
       if (key !== this.optionKey) {
         this.optionKey = key; this.panel.replaceChildren();
         options.forEach((o, index) => { const item = document.createElement('div'); item.className = 'dropdown-option'; item.id = `${this.id}-option-${index}`; item.setAttribute('role', 'option'); item.setAttribute('aria-disabled', String(o.disabled)); item.dataset.index = String(index);
-          const content = document.createElement('span'); content.textContent = o.text; const tick = document.createElement('span'); tick.className = 'dropdown-tick'; tick.textContent = '✓'; tick.setAttribute('aria-hidden', 'true'); item.append(content, tick);
+          const content = document.createElement('span'); content.textContent = o.text; const tick = document.createElement('span'); tick.className = 'dropdown-tick'; tick.append(icon('check')); tick.setAttribute('aria-hidden', 'true'); item.append(content, tick);
           item.addEventListener('pointermove', () => { if (!o.disabled && this.active !== index) this.highlight(index, false); });
           item.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); this.commit(index); }); this.panel.append(item);
         });
@@ -52,16 +54,14 @@
       current = this; this.opened = true; this.animation?.cancel(); this.panel.hidden = false; this.host.classList.add('is-open'); this.trigger.setAttribute('aria-expanded', 'true');
       this.sync(); this.highlight(index ?? Math.max(0, this.source.selectedIndex), true); this.position();
       if (!reduced()) this.animation = this.panel.animate([
-        { opacity: 0, transform: 'translateY(-8px) scale(.94)' },
-        { offset: .6, opacity: 1, transform: 'translateY(2px) scale(1.025)' },
-        { offset: .82, transform: 'translateY(-1px) scale(.995)' },
+        { opacity: 0, transform: 'translateY(-6px) scale(.98)' },
         { opacity: 1, transform: 'translateY(0) scale(1)' },
-      ], { duration: 280, easing: 'cubic-bezier(.2,.85,.3,1)', fill: 'both' });
+      ], { duration: 220, easing: 'cubic-bezier(.16,1,.3,1)', fill: 'both' });
     }
     close(focus = false) {
       if (!this.opened) return; this.opened = false; if (current === this) current = null;
       this.host.classList.remove('is-open'); this.trigger.setAttribute('aria-expanded', 'false'); this.trigger.removeAttribute('aria-activedescendant'); this.animation?.cancel();
-      if (!reduced()) { this.animation = this.panel.animate([{ opacity: 1, transform: 'translateY(0) scale(1)' }, { opacity: 0, transform: 'translateY(-5px) scale(.97)' }], { duration: 200, easing: 'cubic-bezier(.2,.7,.3,1)' }); this.animation.onfinish = () => { if (!this.opened) this.panel.hidden = true; }; }
+      if (!reduced()) { this.animation = this.panel.animate([{ opacity: 1, transform: 'translateY(0) scale(1)' }, { opacity: 0, transform: 'translateY(-5px) scale(.97)' }], { duration: 150, easing: 'cubic-bezier(.16,1,.3,1)' }); this.animation.onfinish = () => { if (!this.opened) this.panel.hidden = true; }; }
       else this.panel.hidden = true;
       if (focus) this.trigger.focus();
     }
@@ -77,7 +77,7 @@
     commit(index) {
       const option = this.options()[index]; if (!option || option.disabled) return;
       this.source.value = option.value; this.source.dispatchEvent(new Event('input', { bubbles: true })); this.source.dispatchEvent(new Event('change', { bubbles: true })); this.sync(); this.close(true);
-      if (!reduced()) this.trigger.animate([{ transform: 'scale(.97)' }, { offset: .55, transform: 'scale(1.025)' }, { transform: 'scale(1)' }], { duration: 230, easing: 'cubic-bezier(.2,.8,.25,1)' });
+      if (!reduced()) this.trigger.animate([{ transform: 'scale(.98)' }, { transform: 'scale(1)' }], { duration: 180, easing: 'cubic-bezier(.16,1,.3,1)' });
     }
     keydown(event) {
       const key = event.key;
@@ -95,5 +95,5 @@
   document.addEventListener('focusin', event => { if (current && !current.host.contains(event.target)) current.close(); });
   window.addEventListener('resize', () => current?.position()); document.addEventListener('scroll', event => { if (current && !current.panel.contains(event.target)) current.close(); }, true);
   document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('close', () => current?.close()));
-  window.UwbDropdowns = Object.freeze({ refreshAll() { enhance(); for (const control of controls.values()) control.sync(); } });
+  window.UwbDropdowns = Object.freeze({ closeAll() { current?.close(); }, refreshAll() { enhance(); for (const control of controls.values()) control.sync(); } });
 })();

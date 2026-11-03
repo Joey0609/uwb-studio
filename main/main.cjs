@@ -4,21 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {pathToFileURL} = require('node:url');
 const {createAcquisitionLog} = require('./acquisition-log.cjs');
+const {ReplayFiles,normalizeHistory} = require('./replay-files.cjs');
+const {QUICK_COMMANDS_VERSION,SELECTED_QUICK_COMMANDS,migrateQuickCommands}=require('./quick-commands.cjs');
 if(process.env.UWB_USER_DATA_DIR){fs.mkdirSync(process.env.UWB_USER_DATA_DIR,{recursive:true});app.setPath('userData',process.env.UWB_USER_DATA_DIR);}
-let window, worker, settingsPath, settings, closing=false, rpcId=1, recordingWarning='';
+let window, worker, settingsPath, settings, replayFiles, fileReplayFiles, closing=false, rpcId=1, recordingWarning='';
 const calls=new Map();
-const defaults={theme:'system',scope:'radio',gateway:null,quickVersion:4,quickCommands:[
-  {label:'节点信息',command:'swarm info'},{label:'矩阵快照',command:'swarm snapshot'},{label:'节点状态',command:'swarm status'},{label:'邻居观测',command:'swarm neighbors'},
-  {label:'本机地址',command:'racaddr'},
-  {label:'开启数据',command:'swarm stream on'},{label:'关闭数据',command:'swarm stream off'},
-  {label:'广播测距启动',command:'swarm broadcast start'},{label:'纯监听启动',command:'swarm monitor start'},{label:'停止本机测距',command:'swarm stop'},
-  {label:'邻居发现（旧模式）',command:'neighbordiscover'},
-  {label:'邻居列表（旧模式）',command:'neighborlist'},
-  {label:'UWB芯片（旧模式）',command:'readreg 0'},
-  {label:'单次测距…',command:'range <目标地址>'},
-  {label:'广播消息…',command:'broadcastsend <消息内容>'},
-  {label:'全部命令',command:'help'}
-]};
+const defaults={experimentDirectory:'E:\\Multi_target_localization\\uwb-broadcast-ranging\\test-record',replayHistory:[],fileReplayHistory:[],theme:'system',showPositionZ:false,scope:'radio',gateway:null,quickVersion:QUICK_COMMANDS_VERSION,quickCommands:SELECTED_QUICK_COMMANDS.map(item=>({...item}))};
+
 function call(method,args){
   return new Promise((resolve,reject)=>{
     const id=rpcId++,timer=setTimeout(()=>{calls.delete(id);reject(Error('操作超时，请检查串口及设备状态'));},15000);
@@ -27,16 +19,23 @@ function call(method,args){
 }
 function updateSettings(patch){
   if(!patch||typeof patch!=='object')throw Error('设置格式无效');
+  if(patch.showPositionZ!==undefined&&typeof patch.showPositionZ!=='boolean')throw Error('显示 Z 轴设置无效');
+  if(patch.experimentDirectory!==undefined){
+    const directory=patch.experimentDirectory;
+    if(typeof directory!=='string'||!path.isAbsolute(directory)||/[\0\r\n]/.test(directory))throw Error('实验保存路径必须是绝对路径');
+    fs.mkdirSync(directory,{recursive:true});fs.accessSync(directory,fs.constants.W_OK);settings.experimentDirectory=path.normalize(directory);
+  }
   if(patch.theme!==undefined){if(!['light','dark','system'].includes(patch.theme))throw Error('主题无效');settings.theme=patch.theme;}
   if(patch.scope!==undefined){if(!['radio','connected'].includes(patch.scope))throw Error('控制范围无效');settings.scope=patch.scope;}
   if(patch.gateway!==undefined)settings.gateway=typeof patch.gateway==='string'?patch.gateway.slice(0,256):null;
   if(patch.quickCommands!==undefined){
-    if(!Array.isArray(patch.quickCommands)||patch.quickCommands.length>40)throw Error('最多40个快捷指令');
+    if(!Array.isArray(patch.quickCommands)||patch.quickCommands.length>128)throw Error('最多128个快捷指令');
     settings.quickCommands=patch.quickCommands.map(c=>{
       if(typeof c.label!=='string'||typeof c.command!=='string'||!c.label.trim()||c.label.length>40||Buffer.byteLength(c.command)>256||/[\r\n\0]/.test(c.command))throw Error('快捷指令格式无效');
       return {label:c.label,command:c.command};
     });
   }
+  if(patch.showPositionZ!==undefined)settings.showPositionZ=patch.showPositionZ;
   fs.writeFileSync(settingsPath,JSON.stringify(settings,null,2),'utf8');return settings;
 }
 if(!app.requestSingleInstanceLock())app.quit();
@@ -44,15 +43,19 @@ else{
   app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
   app.whenReady().then(()=>{
     settingsPath=path.join(app.getPath('userData'),'settings.json');
-    try{settings={...defaults,...JSON.parse(fs.readFileSync(settingsPath,'utf8'))};}catch{settings={...defaults};}
-    // 只升级完整匹配旧默认的列表；用户增删改过的快捷指令不追加、不覆盖。
-    const priorDefault=[
-      ['节点信息','swarm info'],['矩阵快照','swarm snapshot'],['节点状态','swarm status'],['邻居观测','swarm neighbors'],['本机地址','racaddr'],
-      ['开启数据','swarm stream on'],['关闭数据','swarm stream off'],['停止本机测距','swarm stop'],['邻居发现（旧模式）','neighbordiscover'],
-      ['邻居列表（旧模式）','neighborlist'],['UWB芯片（旧模式）','readreg 0'],['单次测距…','range <目标地址>'],['广播消息…','broadcastsend <消息内容>'],['全部命令','help']
-    ];
-    if(Array.isArray(settings.quickCommands)&&priorDefault.length===settings.quickCommands.length&&priorDefault.every(([label,command],i)=>settings.quickCommands[i].label===label&&settings.quickCommands[i].command===command))settings.quickCommands=defaults.quickCommands.map(q=>({...q}));
-    settings.quickVersion=4;
+    let saved={};try{saved=JSON.parse(fs.readFileSync(settingsPath,'utf8'));}catch{}
+    settings={...defaults,...migrateQuickCommands(saved)};
+    settings.showPositionZ=settings.showPositionZ===true;
+    if(typeof settings.experimentDirectory!=='string'||!path.isAbsolute(settings.experimentDirectory))settings.experimentDirectory=defaults.experimentDirectory;
+    settings.replayHistory=normalizeHistory(settings.replayHistory);
+    settings.fileReplayHistory=normalizeHistory(settings.fileReplayHistory);
+    fs.writeFileSync(settingsPath,JSON.stringify(settings,null,2),'utf8');
+    replayFiles=new ReplayFiles({call,getDirectory:()=>settings.experimentDirectory,getHistory:()=>settings.replayHistory,saveHistory:files=>{
+      const next={...settings,replayHistory:files};fs.writeFileSync(settingsPath,JSON.stringify(next,null,2),'utf8');settings=next;
+    },showOpenDialog:options=>dialog.showOpenDialog(window,options)});
+    fileReplayFiles=new ReplayFiles({method:'fileReplayAction',call,getDirectory:()=>settings.experimentDirectory,getHistory:()=>settings.fileReplayHistory,saveHistory:files=>{
+      const next={...settings,fileReplayHistory:files};fs.writeFileSync(settingsPath,JSON.stringify(next,null,2),'utf8');settings=next;
+    },showOpenDialog:options=>dialog.showOpenDialog(window,options)});
     const stamp=new Date().toISOString().replace(/[:.]/g,'-');
     const directory=process.env.UWB_RECORDINGS_DIR||path.join(app.getPath('documents'),'UWB Studio','recordings',stamp);
     // 主进程先完成建目录，不能依赖子进程异步启动时抢先创建。
@@ -62,6 +65,8 @@ else{
     acquisitionLog.on('error',()=>{worker.stdout?.resume();worker.stderr?.resume();});
     worker.on('message',message=>{
       if(message.event==='snapshot'){
+        if(message.data.replay)message.data.replay=replayFiles.decorate(message.data.replay);
+        if(message.data.fileReplay)message.data.fileReplay=fileReplayFiles.decorate(message.data.fileReplay);
         if(recordingWarning)message.data.recording={...message.data.recording,error:[message.data.recording?.error,recordingWarning].filter(Boolean).join('；')};
         if(window&&!window.isDestroyed())window.webContents.send('uwb:snapshot',message.data);return;
       }
@@ -83,7 +88,7 @@ else{
       title:'UWB Studio',backgroundColor:'#f5f5f0',show:false,autoHideMenuBar:true,
       webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
     const page=pathToFileURL(path.join(__dirname,'../renderer/index.html')).href;
-    for(const name of ['listPorts','connect','disconnect','removePort','send','control','setMode','nodeControl','getSnapshot']){
+    for(const name of ['listPorts','connect','disconnect','removePort','send','control','setMode','nodeControl','localizationAction','getSnapshot']){
       ipcMain.handle('uwb:'+name,(event,args)=>{
         if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效操作来源');
         if(['setMode','nodeControl'].includes(name)){
@@ -91,9 +96,23 @@ else{
           if(name==='setMode'&&!['broadcast','monitor'].includes(args.mode)||name==='nodeControl'&&!['start','stop'].includes(args.action))throw Error('节点模式或操作无效');
           const safe=name==='setMode'?{path:args.path,mode:args.mode}:{path:args.path,action:args.action};return call(name,safe);
         }
-        return call(name,args);
+        const result=call(name,name==='localizationAction'&&args?.action==='reset'?{action:'reset',destination:settings.experimentDirectory}:args);
+        return name==='getSnapshot'?result.then(data=>({...data,replay:replayFiles.decorate(data.replay||{}),fileReplay:fileReplayFiles.decorate(data.fileReplay||{})})):result;
       });
     }
+    ipcMain.handle('uwb:replayAction',async(event,args)=>{
+      if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效操作来源');
+      return replayFiles.action(args);
+    });
+    ipcMain.handle('uwb:fileReplayAction',async(event,args)=>{
+      if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效操作来源');
+      if(!args||typeof args!=='object'||Array.isArray(args)||!['open','history','start','pause','continue','stop','close','speed','automatic','advance','snapshot'].includes(args.action))throw Error('文件回放操作无效');
+      return fileReplayFiles.action(args);
+    });
+    ipcMain.handle('uwb:chooseExperimentDirectory',async()=>{
+      const result=await dialog.showOpenDialog(window,{title:'实验自动保存路径',defaultPath:settings.experimentDirectory,properties:['openDirectory','createDirectory']});
+      return result.canceled?null:result.filePaths[0];
+    });
     ipcMain.handle('uwb:getSettings',()=>settings);
     ipcMain.handle('uwb:copyText',(event,value)=>{
       if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效复制来源');
@@ -117,6 +136,11 @@ else{
       {label:'视图',submenu:[{role:'resetZoom',label:'实际大小'},{role:'zoomIn',label:'放大'},{role:'zoomOut',label:'缩小'},{role:'togglefullscreen',label:'全屏'}]}
     ]));
     window.once('ready-to-show',()=>window.show());
+    window.webContents.once('did-finish-load',async()=>{
+      const fileArg=process.argv.find(value=>value.startsWith('--replay-file='));if(!fileArg)return;
+      try{await replayFiles.loadFile(fileArg.slice('--replay-file='.length));await window.webContents.executeJavaScript('window.UwbLocalizationView.selectPage("replay")');}
+      catch(error){dialog.showErrorBox('回放文件无法打开',error.message);}
+    });
     window.loadURL(page);
     window.on('closed',()=>{window=null;});
   }).catch(error=>{dialog.showErrorBox('启动失败',error.message);app.quit();});

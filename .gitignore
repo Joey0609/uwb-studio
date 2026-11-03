@@ -6,3 +6,6 @@ recordings/
 *.local.json
 
 release-diagonal/
+
+build/
+.playwright-mcp/

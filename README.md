@@ -1,10 +1,10 @@
 # UWB Studio
 
-用于 ESP32-C6 / STM32 广播测距节点的本地 Electron 工作台。默认使用真实串口，不装载演示距离。
+用于 ESP32-C6 / STM32 广播测距节点的本地 Electron 工作台。默认使用真实串口。提供无需串口的文件定位回放与独立串口发送；新实验同时记录阶段操作，可直接重放定位，详见[回放](docs/REPLAY.md)。
 
 ## 运行
 
-- Windows 免安装程序：`release/UWB-Studio-1.4.3-x64.exe`。也可以使用 `release/win-unpacked/UWB Studio.exe`。
+- Windows 免安装程序：`release/UWB-Studio-1.0.0-x64.exe`。
 - 源码运行：在本目录执行 `npm ci`、`npm start`。
 - 打包：`npm run dist`。
 

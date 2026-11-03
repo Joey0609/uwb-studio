@@ -8,29 +8,97 @@
   <link rel="stylesheet" href="style.css">
   <script src="dropdowns.js" defer></script>
   <script src="command-policy.js" defer></script>
+  <script src="replay-view.js" defer></script>
+  <script src="file-replay-view.js" defer></script>
+  <script src="position-cells.js" defer></script>
+  <script src="distance-matrix.js" defer></script>
+  <script src="localization-view.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
   <svg class="icon-definitions" aria-hidden="true"><defs>
-    <symbol id="i-radio" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M8 7a7 7 0 0 0 0 10M16 7a7 7 0 0 1 0 10M5 4a11 11 0 0 0 0 16M19 4a11 11 0 0 1 0 16"/></symbol>
-    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
-    <symbol id="i-node" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="18" r="3"/><circle cx="19" cy="18" r="3"/><path d="m10 8-4 7m8-7 4 7M8 18h8"/></symbol>
-    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/></symbol>
-    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m10 3-.6 2.3-2 .9-2.2-.6-2 3.4 1.6 1.7v2.6L3.2 15l2 3.4 2.2-.6 2 .9L10 21h4l.6-2.3 2-.9 2.2.6 2-3.4-1.6-1.7v-2.6l1.6-1.7-2-3.4-2.2.6-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></symbol>
-    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
-    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 8a7 7 0 0 1 11.5-3L20 8M4 16l2.9 3A7 7 0 0 0 18.4 16"/></symbol>
-    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></symbol>
-    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
-    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
-    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4"/></symbol>
-    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 15v5h16v-5"/></symbol>
-    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></symbol>
-    <symbol id="i-send" viewBox="0 0 24 24"><path d="m3 3 19 9-19 9 4-9zm4 9h15"/></symbol>
-    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
-    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
-    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
-    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
-    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+    <!-- Lucide SVG，ISC许可及原始文件见 vendor/lucide。 -->
+    <symbol id="i-radio" viewBox="0 0 24 24"><path d="M16.247 7.761a6 6 0 0 1 0 8.478" />
+  <path d="M19.075 4.933a10 10 0 0 1 0 14.134" />
+  <path d="M4.925 19.067a10 10 0 0 1 0-14.134" />
+  <path d="M7.753 16.239a6 6 0 0 1 0-8.478" />
+  <circle cx="12" cy="12" r="2" /></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1" />
+  <rect width="7" height="5" x="14" y="3" rx="1" />
+  <rect width="7" height="9" x="14" y="12" rx="1" />
+  <rect width="7" height="5" x="3" y="16" rx="1" /></symbol>
+    <symbol id="i-node" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1" />
+  <rect x="2" y="16" width="6" height="6" rx="1" />
+  <rect x="9" y="2" width="6" height="6" rx="1" />
+  <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" />
+  <path d="M12 12V8" /></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m7 11 2-2-2-2" />
+  <path d="M11 13h4" />
+  <rect width="18" height="18" x="3" y="3" rx="2" ry="2" /></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M14 17H5" />
+  <path d="M19 7h-9" />
+  <circle cx="17" cy="17" r="3" />
+  <circle cx="7" cy="7" r="3" /></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" />
+  <path d="M12 5v14" /></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+  <path d="M21 3v5h-5" />
+  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+  <path d="M8 16H3v5" /></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z" /></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="14" y="3" width="5" height="18" rx="1" />
+  <rect x="5" y="3" width="5" height="18" rx="1" /></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3" />
+  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+  <path d="m7 10 5 5 5-5" /></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M10 11v6" />
+  <path d="M14 11v6" />
+  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+  <path d="M3 6h18" />
+  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />
+  <path d="m21.854 2.147-10.94 10.939" /></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14" />
+  <path d="m12 5 7 7-7 7" /></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18" />
+  <path d="m6 6 12 12" /></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" />
+  <path d="M12 2v2" />
+  <path d="M12 20v2" />
+  <path d="m4.93 4.93 1.41 1.41" />
+  <path d="m17.66 17.66 1.41 1.41" />
+  <path d="M2 12h2" />
+  <path d="M20 12h2" />
+  <path d="m6.34 17.66-1.41 1.41" />
+  <path d="m19.07 4.93-1.41 1.41" /></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" />
+  <path d="M12 16v-4" />
+  <path d="M12 8h.01" /></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><path d="M12 20v2" />
+  <path d="M12 2v2" />
+  <path d="M17 20v2" />
+  <path d="M17 2v2" />
+  <path d="M2 12h2" />
+  <path d="M2 17h2" />
+  <path d="M2 7h2" />
+  <path d="M20 12h2" />
+  <path d="M20 17h2" />
+  <path d="M20 7h2" />
+  <path d="M7 20v2" />
+  <path d="M7 2v2" />
+  <rect x="4" y="4" width="16" height="16" rx="2" />
+  <rect x="8" y="8" width="8" height="8" rx="1" /></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol>
+    <symbol id="i-location" viewBox="0 0 24 24"><line x1="2" x2="5" y1="12" y2="12" />
+  <line x1="19" x2="22" y1="12" y2="12" />
+  <line x1="12" x2="12" y1="2" y2="5" />
+  <line x1="12" x2="12" y1="19" y2="22" />
+  <circle cx="12" cy="12" r="7" />
+  <circle cx="12" cy="12" r="3" /></symbol>
   </defs></svg>
 
   <aside class="rail" aria-label="主导航">
@@ -39,55 +107,58 @@
       <button class="nav-button active" data-nav="overview" aria-label="总览" aria-current="page"><svg><use href="#i-grid"/></svg><span>总览</span></button>
       <button class="nav-button" data-nav="nodes" aria-label="节点"><svg><use href="#i-node"/></svg><span>节点</span></button>
       <button class="nav-button" data-nav="terminal" aria-label="串口终端"><svg><use href="#i-terminal"/></svg><span>终端</span></button>
+      <button class="nav-button" data-nav="localization" aria-label="协同定位"><svg><use href="#i-location"/></svg><span>定位</span></button>
+      <button class="nav-button" data-nav="file-replay" aria-label="文件回放"><svg><use href="#i-play"/></svg><span>文件回放</span></button>
+      <button class="nav-button" data-nav="replay" aria-label="串口回放"><svg><use href="#i-play"/></svg><span>串口回放</span></button>
     </nav>
-    <div class="rail-bottom"><button class="nav-button" id="open-settings" aria-label="设置"><svg><use href="#i-settings"/></svg><span>设置</span></button><div class="rail-version">1.4.3</div></div>
+    <div class="rail-bottom"><button class="nav-button" id="open-settings" aria-label="设置"><svg><use href="#i-settings"/></svg><span>设置</span></button><div class="rail-version">1.0.0</div></div>
   </aside>
 
   <div class="app-shell">
     <header class="app-header">
-      <div class="app-title"><h1>UWB Studio</h1><span class="title-divider"></span><p>广播测距串口监控</p></div>
-      <div class="header-actions"><span class="capture-indicator" id="capture-status"><span class="status-dot"></span>等待连接</span><select id="theme-select" aria-label="显示主题"><option value="system">跟随系统</option><option value="light">浅色主题</option><option value="dark">深色主题</option></select><button class="button icon-button" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg><use href="#i-sun"/></svg></button><button class="button" id="export-csv"><svg><use href="#i-download"/></svg>导出距离</button></div>
+      <div class="app-title"><h1>UWB Studio</h1></div>
+      <div class="header-actions"><span class="capture-indicator" id="capture-status"><span class="status-dot"></span>等待连接</span><select id="theme-select" aria-label="显示主题"><option value="system">跟随系统</option><option value="light">浅色主题</option><option value="dark">深色主题</option></select><button class="button icon-button" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg><use href="#i-sun"/></svg></button></div>
     </header>
     <main id="main-content">
-      <div id="preview-banner" class="preview-banner" hidden>界面预览模式。请在桌面应用中连接真实串口；当前没有测量数据。</div>
+      <div id="preview-banner" class="preview-banner" hidden>桌面连接不可用</div>
       <section class="ports-section" aria-labelledby="ports-heading">
         <div class="section-heading"><h2 id="ports-heading">串口连接 <span id="port-count" class="subtle-count">0</span></h2><div class="section-actions"><label class="compact-label">波特率<select id="default-baud" aria-label="默认波特率"><option>115200</option><option>230400</option><option>460800</option><option>921600</option></select></label><button class="text-button" id="connect-suggested"><svg><use href="#i-check"/></svg>一键连接</button><button class="text-button" id="scan-ports"><svg><use href="#i-refresh"/></svg>扫描串口</button></div></div>
         <div class="port-strip" id="port-strip"><button class="add-port" id="add-port"><svg><use href="#i-plus"/></svg><span>添加串口</span></button></div>
       </section>
 
       <section class="panel overview-panel" id="overview-section" aria-labelledby="matrix-title">
-        <div class="workspace-toolbar"><div><h2 id="matrix-title">各串口独立距离矩阵</h2><p>同屏比较各设备实际收到的数据与更新时间</p></div><div class="network-actions"><select id="control-scope" aria-label="全网控制范围"><option value="radio">无线全网</option><option value="connected">USB已连接节点</option></select><select id="gateway" aria-label="全网控制网关"><option value="">自动选择网关</option></select><button class="button primary" id="network-start"><svg><use href="#i-play"/></svg>全部开始</button><button class="button" id="network-stop"><svg><use href="#i-stop"/></svg>全部停止</button></div></div>
-        <p id="control-mode-hint" class="control-mode-hint"></p><div id="control-feedback" class="control-feedback" hidden aria-live="polite"></div>
-        <div class="port-matrix-grid" id="port-matrix-grid" aria-label="每个串口自己的独立距离矩阵"><div class="empty-state port-matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>连接设备，同时查看各自的距离矩阵</h3><p>每张卡只显示该串口收到的观测，未收到的节点对显示 —。</p><button class="button primary" id="port-matrix-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div></div>
-        <details id="aggregate-view" class="aggregate-view"><summary>汇总查看 <span>按观察串口查看矩阵及节点控制</span></summary>
+        <div class="workspace-toolbar"><div><h2 id="matrix-title">各串口独立距离矩阵</h2></div><div class="network-actions"><select id="control-scope" aria-label="全网控制范围"><option value="radio">无线全网</option><option value="connected">USB已连接节点</option></select><select id="gateway" aria-label="全网控制网关"><option value="">自动选择网关</option></select><button class="button primary" id="network-start"><svg><use href="#i-play"/></svg>全部开始</button><button class="button" id="network-stop"><svg><use href="#i-stop"/></svg>全部停止</button></div></div>
+        <div id="control-feedback" class="control-feedback" hidden aria-live="polite"></div>
+        <div class="port-matrix-grid" id="port-matrix-grid" aria-label="每个串口自己的独立距离矩阵"><div class="empty-state port-matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>暂无测距数据</h3><button class="button primary" id="port-matrix-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div></div>
+        <details id="aggregate-view" class="aggregate-view"><summary>汇总查看 </summary>
         <div class="node-tabs" id="node-tabs" aria-label="选择节点"></div>
         <div class="matrix-workspace">
-          <div class="matrix-area"><div class="matrix-caption"><span>节点 A ↓ <span class="separator">/</span> 节点 B →</span><span>单位 m <span class="subtle">· 过期显示 —</span></span></div><div class="matrix-scroll" id="matrix-scroll"><div class="empty-state matrix-empty" id="matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>等待第一条真实测量</h3><p>添加设备串口并开始测距，节点会自动出现在这里。</p><button class="button primary" id="empty-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div><table class="distance-matrix" id="distance-matrix" hidden aria-label="当前串口无向距离矩阵"></table></div><div class="matrix-footnote"><svg><use href="#i-info"/></svg>当前选中串口的独立观测；左下三角遮色，对角线为 —，右上三角3秒无有效距离更新显示 —；串口-1不清空。</div></div>
-          <aside class="node-detail" id="node-detail" aria-label="选中节点详情"><div class="empty-state detail-empty"><svg><use href="#i-node"/></svg><p>选择节点，查看观测与控制。</p></div></aside>
+          <div class="matrix-area"><div class="matrix-caption"><span>节点 A ↓ <span class="separator">/</span> 节点 B →</span><span>单位 m </span></div><div class="matrix-scroll" id="matrix-scroll"><div class="empty-state matrix-empty" id="matrix-empty"><div class="empty-glyph"><svg><use href="#i-radio"/></svg></div><h3>等待第一条真实测量</h3><button class="button primary" id="empty-connect"><svg><use href="#i-plus"/></svg>连接设备</button></div><table class="distance-matrix" id="distance-matrix" hidden aria-label="当前串口无向距离矩阵"></table></div></div>
+          <aside class="node-detail" id="node-detail" aria-label="选中节点详情"><div class="empty-state detail-empty"><svg><use href="#i-node"/></svg><p>未选择节点</p></div></aside>
         </div>
         </details>
       </section>
 
       <section class="panel history-panel" aria-labelledby="history-heading">
         <div class="section-heading"><div class="heading-inline"><h2 id="history-heading">距离历史</h2><span class="section-note" id="history-source">等待节点</span></div><div class="section-actions"><select id="history-port" aria-label="历史观察串口"><option value="">等待串口</option></select><select id="history-peer" aria-label="历史曲线目标"><option value="">全部目标</option></select><select id="history-window" aria-label="历史显示时长"><option value="60000">最近 1 分钟</option><option value="300000">最近 5 分钟</option><option value="900000">最近 15 分钟</option></select></div></div>
-        <div class="chart-legend" id="chart-legend"></div><div class="chart-wrap"><canvas id="history-chart" aria-label="选中串口的节点对距离历史" role="img"></canvas><div class="chart-empty" id="chart-empty">真实测量到达后显示曲线，数据中断处保留空隙。</div></div>
+        <div class="chart-legend" id="chart-legend"></div><div class="chart-wrap"><canvas id="history-chart" aria-label="选中串口的节点对距离历史" role="img"></canvas><div class="chart-empty" id="chart-empty">暂无距离记录</div></div>
       </section>
 
       <section class="panel terminal-panel" id="terminal-section" aria-labelledby="terminal-heading">
         <div class="section-heading terminal-heading"><div class="heading-inline"><h2 id="terminal-heading">串口终端</h2><span class="section-note" id="terminal-count">最新 500 条</span></div><div class="section-actions"><button class="button small" id="pause-terminal"><svg><use href="#i-pause"/></svg><span>暂停显示</span></button><button class="button small icon-button" id="copy-terminal" title="复制当前可见记录" aria-label="复制终端"><svg><use href="#i-copy"/></svg></button><button class="button small icon-button" id="clear-terminal" title="清空当前显示" aria-label="清空当前终端"><svg><use href="#i-trash"/></svg></button><button class="button small" id="export-terminal"><svg><use href="#i-download"/></svg>导出</button></div></div>
         <div class="terminal-toolbar"><div class="terminal-tabs" id="terminal-tabs"></div><div class="terminal-filters"><select id="terminal-direction" aria-label="过滤记录方向"><option value="all">全部方向</option><option value="rx">接收</option><option value="tx">发送</option><option value="system">系统</option></select><input id="terminal-filter" type="search" placeholder="过滤记录…" aria-label="过滤终端记录"></div></div>
-        <div class="terminal-lines" id="terminal-lines" role="log" aria-label="串口原始记录" aria-live="off"><div class="terminal-empty">连接串口后，在这里查看设备的原始输出。</div></div>
+        <div class="terminal-lines" id="terminal-lines" role="log" aria-label="串口原始记录" aria-live="off"><div class="terminal-empty">暂无记录</div></div>
         <div class="quick-commands" id="quick-commands"></div>
-        <form class="command-form" id="command-form"><span class="command-prompt">›</span><input id="command-input" placeholder="输入指令，↑ ↓ 浏览历史" autocomplete="off" spellcheck="false" aria-label="串口指令"><label class="all-ports-toggle"><input type="checkbox" id="send-all">全部连接</label><select id="line-ending" aria-label="指令结尾"><option value="crlf">CRLF</option><option value="lf">LF</option><option value="none">无换行</option></select><button class="button primary" type="submit"><svg><use href="#i-send"/></svg>发送</button></form>
-        <div class="terminal-status"><span id="terminal-port-status">尚未选择串口</span><span id="terminal-pause-status">显示最新 500 条 · 原始采集独立运行</span></div>
+        <form class="command-form" id="command-form"><span class="command-prompt">›</span><input id="command-input" placeholder="输入指令" autocomplete="off" spellcheck="false" aria-label="串口指令"><label class="all-ports-toggle"><input type="checkbox" id="send-all">全部连接</label><select id="line-ending" aria-label="指令结尾"><option value="crlf">CRLF</option><option value="lf">LF</option><option value="none">无换行</option></select><button class="button primary" type="submit"><svg><use href="#i-send"/></svg>发送</button></form>
+        <div class="terminal-status"><span id="terminal-port-status">尚未选择串口</span><span id="terminal-pause-status">最新 500 条</span></div>
       </section>
-      <footer class="app-footer"><span><span class="status-dot neutral"></span> 本地串口采集</span><span id="recording-directory">原始记录由桌面应用保存</span><button class="text-button" id="export-raw">导出原始记录</button></footer>
+      <footer class="app-footer"><span><span class="status-dot neutral"></span> 本地串口采集</span><span id="recording-directory"></span><button class="text-button" id="export-raw">导出原始记录</button></footer>
     </main>
   </div>
 
-  <dialog id="ports-dialog" class="modal ports-modal"><div class="modal-heading"><div><h2>连接设备串口</h2><p>选择需要连接的设备。调试探针不会自动连接。</p></div><button class="icon-button button modal-close" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div><div class="connection-options"><label>波特率<select id="dialog-baud"><option>115200</option><option>230400</option><option>460800</option><option>921600</option></select></label><label>文字编码<select id="dialog-encoding"><option value="auto">自动识别</option><option value="utf8">UTF-8</option><option value="gbk">GBK / GB2312</option></select></label><button class="button" id="dialog-scan"><svg><use href="#i-refresh"/></svg>重新扫描</button></div><div id="available-ports" class="available-ports"></div><div class="modal-footer"><span id="scan-summary" class="muted"></span><button class="button primary" id="connect-selected">连接所选串口</button></div></dialog>
+  <dialog id="ports-dialog" class="modal ports-modal"><div class="modal-heading"><div><h2>连接设备串口</h2></div><button class="icon-button button modal-close" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div><div class="connection-options"><label>波特率<select id="dialog-baud"><option>115200</option><option>230400</option><option>460800</option><option>921600</option></select></label><label>文字编码<select id="dialog-encoding"><option value="auto">自动识别</option><option value="utf8">UTF-8</option><option value="gbk">GBK / GB2312</option></select></label><button class="button" id="dialog-scan"><svg><use href="#i-refresh"/></svg>重新扫描</button></div><div id="available-ports" class="available-ports"></div><div class="modal-footer"><span id="scan-summary" class="muted"></span><button class="button primary" id="connect-selected">连接所选串口</button></div></dialog>
 
-  <dialog id="settings-dialog" class="modal settings-modal"><div class="modal-heading"><div><h2>工作台设置</h2><p>主题与快捷指令保存在本机。</p></div><button class="icon-button button modal-close" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div><div class="settings-content"><section><h3>显示主题</h3><div class="theme-options" id="theme-options"><button data-theme-choice="light">浅色</button><button data-theme-choice="dark">深色</button><button data-theme-choice="system">跟随系统</button></div></section><section><div class="section-heading"><h3>自定义快捷指令</h3><button class="text-button" id="add-quick-command"><svg><use href="#i-plus"/></svg>添加</button></div><p class="muted">点击后发送到当前终端选中的串口，保留完整指令内容。</p><div id="quick-command-editor"></div></section><section class="settings-recording"><h3>原始记录</h3><p id="settings-recording-directory" class="recording-path">连接后由桌面应用持续保存。</p><p class="muted">终端暂停、筛选与清空只影响显示，不停止采集。</p></section></div><div class="modal-footer"><span class="muted" id="settings-feedback"></span><button class="button primary" id="save-settings">保存设置</button></div></dialog>
+  <dialog id="settings-dialog" class="modal settings-modal"><div class="modal-heading"><div><h2>工作台设置</h2></div><button class="icon-button button modal-close" aria-label="关闭"><svg><use href="#i-close"/></svg></button></div><div class="settings-content"><section><h3>显示主题</h3><div class="theme-options" id="theme-options"><button data-theme-choice="light">浅色</button><button data-theme-choice="dark">深色</button><button data-theme-choice="system">跟随系统</button></div></section><section><h3>节点位置</h3><label class="settings-toggle"><input type="checkbox" id="show-position-z">显示 Z 轴</label></section><section><div class="section-heading"><h3>自定义快捷指令</h3><button class="text-button" id="add-quick-command"><svg><use href="#i-plus"/></svg>添加</button></div><div id="quick-command-editor"></div></section><section><h3>实验自动保存路径</h3><div class="experiment-directory-row"><input id="experiment-directory" aria-label="实验自动保存路径" spellcheck="false"><button class="button" id="choose-experiment-directory">选择目录</button></div></section><section class="settings-recording"><h3>原始记录</h3><p id="settings-recording-directory" class="recording-path"></p></section></div><div class="modal-footer"><span class="muted" id="settings-feedback"></span><button class="button primary" id="save-settings">保存设置</button></div></dialog>
   <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
 </body>
 </html>
