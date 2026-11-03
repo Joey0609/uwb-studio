@@ -10,5 +10,7 @@ contextBridge.exposeInMainWorld('uwb',Object.freeze({
   getSnapshot:()=>invoke('getSnapshot'),
   localizationAction:args=>invoke('localizationAction',args),replayAction:args=>invoke('replayAction',args),fileReplayAction:args=>invoke('fileReplayAction',args),
   copyText:value=>invoke('copyText',value),
+  updateAction:args=>invoke('updateAction',args),
+  onUpdateStatus:callback=>{const listener=(_event,data)=>callback(data);ipcRenderer.on('uwb:updateStatus',listener);return()=>ipcRenderer.removeListener('uwb:updateStatus',listener);},
   onSnapshot:callback=>{const listener=(_event,data)=>callback(data);ipcRenderer.on('uwb:snapshot',listener);return()=>ipcRenderer.removeListener('uwb:snapshot',listener);}
 }));

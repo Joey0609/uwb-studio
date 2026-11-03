@@ -9,3 +9,8 @@ release-diagonal/
 
 build/
 .playwright-mcp/
+test/
+tests/
+.test/
+*.test.*
+*.spec.*

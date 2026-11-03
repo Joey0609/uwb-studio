@@ -1,0 +1,54 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag, for example v1.1.0'
+        required: true
+        type: string
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify version
+        run: node -e "if (process.env.RELEASE_TAG !== 'v' + require('./package.json').version) throw Error('Release tag mismatch')"
+      - run: npm ci
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem main, renderer, tools -File -Recurse | Where-Object { $_.Extension -in '.js', '.cjs' } | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build Windows installer and portable app
+        run: npm run dist -- --publish never
+      - run: npm run verify:release
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: versions/${{ env.RELEASE_TAG }}.md
+          files: |
+            release/UWB-Studio-Setup-*-x64.exe
+            release/UWB-Studio-Setup-*-x64.exe.blockmap
+            release/UWB-Studio-Portable-*-x64.exe
+            release/latest.yml
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

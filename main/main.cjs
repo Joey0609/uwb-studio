@@ -1,5 +1,5 @@
 'use strict';
-const {app,BrowserWindow,ipcMain,dialog,Menu,utilityProcess,clipboard} = require('electron');
+const {app,BrowserWindow,ipcMain,dialog,Menu,utilityProcess,clipboard,shell} = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const {pathToFileURL} = require('node:url');
@@ -8,8 +8,11 @@ const {ReplayFiles,normalizeHistory} = require('./replay-files.cjs');
 const {QUICK_COMMANDS_VERSION,SELECTED_QUICK_COMMANDS,migrateQuickCommands}=require('./quick-commands.cjs');
 if(process.env.UWB_USER_DATA_DIR){fs.mkdirSync(process.env.UWB_USER_DATA_DIR,{recursive:true});app.setPath('userData',process.env.UWB_USER_DATA_DIR);}
 let window, worker, settingsPath, settings, replayFiles, fileReplayFiles, closing=false, rpcId=1, recordingWarning='';
+const {autoUpdater}=require('electron-updater');
+const {createUpdateService}=require('./updates.cjs');
+let updates;
 const calls=new Map();
-const defaults={experimentDirectory:'E:\\Multi_target_localization\\uwb-broadcast-ranging\\test-record',replayHistory:[],fileReplayHistory:[],theme:'system',showPositionZ:false,scope:'radio',gateway:null,quickVersion:QUICK_COMMANDS_VERSION,quickCommands:SELECTED_QUICK_COMMANDS.map(item=>({...item}))};
+const defaults={experimentDirectory:null,replayHistory:[],fileReplayHistory:[],theme:'system',showPositionZ:false,scope:'radio',gateway:null,quickVersion:QUICK_COMMANDS_VERSION,quickCommands:SELECTED_QUICK_COMMANDS.map(item=>({...item}))};
 
 function call(method,args){
   return new Promise((resolve,reject)=>{
@@ -42,7 +45,17 @@ if(!app.requestSingleInstanceLock())app.quit();
 else{
   app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.show();window.focus();}});
   app.whenReady().then(()=>{
+    defaults.experimentDirectory=path.join(app.getPath('documents'),'UWB Studio','experiments');
     settingsPath=path.join(app.getPath('userData'),'settings.json');
+    updates=createUpdateService({app,autoUpdater,portable:!!process.env.PORTABLE_EXECUTABLE_FILE,
+      send:data=>{if(window&&!window.isDestroyed())window.webContents.send('uwb:updateStatus',data);},
+      openExternal:url=>shell.openExternal(url),
+      prepareInstall:async()=>{
+        const state=await call('getSnapshot');
+        if(state.localization?.experimentActive&&!state.fileReplay?.active)throw Error('请先结束并保存当前实验');
+        if(['playing','paused'].includes(state.replay?.state)||['playing','paused'].includes(state.fileReplay?.state))throw Error('请先停止当前回放');
+        await call('close');closing=true;worker.kill();
+      }});
     let saved={};try{saved=JSON.parse(fs.readFileSync(settingsPath,'utf8'));}catch{}
     settings={...defaults,...migrateQuickCommands(saved)};
     settings.showPositionZ=settings.showPositionZ===true;
@@ -88,6 +101,10 @@ else{
       title:'UWB Studio',backgroundColor:'#f5f5f0',show:false,autoHideMenuBar:true,
       webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true,webSecurity:true}});
     const page=pathToFileURL(path.join(__dirname,'../renderer/index.html')).href;
+    ipcMain.handle('uwb:updateAction',(event,args)=>{
+      if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效更新来源');
+      return updates.action(args);
+    });
     for(const name of ['listPorts','connect','disconnect','removePort','send','control','setMode','nodeControl','localizationAction','getSnapshot']){
       ipcMain.handle('uwb:'+name,(event,args)=>{
         if(event.sender.id!==window.webContents.id||event.senderFrame!==window.webContents.mainFrame)throw Error('无效操作来源');
@@ -135,7 +152,7 @@ else{
       {label:'编辑',submenu:[{role:'copy',label:'复制'},{role:'paste',label:'粘贴'},{role:'selectAll',label:'全选'}]},
       {label:'视图',submenu:[{role:'resetZoom',label:'实际大小'},{role:'zoomIn',label:'放大'},{role:'zoomOut',label:'缩小'},{role:'togglefullscreen',label:'全屏'}]}
     ]));
-    window.once('ready-to-show',()=>window.show());
+    window.once('ready-to-show',()=>{window.show();updates.start();});
     window.webContents.once('did-finish-load',async()=>{
       const fileArg=process.argv.find(value=>value.startsWith('--replay-file='));if(!fileArg)return;
       try{await replayFiles.loadFile(fileArg.slice('--replay-file='.length));await window.webContents.executeJavaScript('window.UwbLocalizationView.selectPage("replay")');}
